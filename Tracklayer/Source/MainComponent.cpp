@@ -7,12 +7,14 @@ MainComponent::MainComponent (ApplicationProperties& props) : properties (props)
     LookAndFeel::setDefaultLookAndFeel (&lookAndFeel);
     setLookAndFeel (&lookAndFeel);
 
-    ctx.tracksChanged    = [this]
+    SafePointer<MainComponent> safeThis (this);
+    ctx.tracksChanged    = [this, safeThis]
     {
         // deferred: the caller may be a component that the rebuild deletes
         if (rebuildPending) return;
         rebuildPending = true;
-        MessageManager::callAsync ([sp = SafePointer<MainComponent> (this)]
+        auto sp = safeThis;
+        MessageManager::callAsync ([sp]
         {
             if (sp != nullptr) { sp->rebuildPending = false; sp->rebuildTracks(); }
         });
@@ -42,7 +44,11 @@ MainComponent::MainComponent (ApplicationProperties& props) : properties (props)
     }
     engine.dirty = false;
 
+   #if JUCE_MAC
+    MenuBarModel::setMacMainMenu (this);   // use the Mac's top menu bar
+   #else
     addAndMakeVisible (menuBar);
+   #endif
     addAndMakeVisible (transport);
     addAndMakeVisible (arrange);
     addChildComponent (mixer);
@@ -62,6 +68,9 @@ MainComponent::~MainComponent()
     stopTimer();
     saveDeviceState();
     engine.deviceManager.removeChangeListener (this);
+   #if JUCE_MAC
+    MenuBarModel::setMacMainMenu (nullptr);
+   #endif
     setLookAndFeel (nullptr);
     LookAndFeel::setDefaultLookAndFeel (nullptr);
 }
@@ -75,7 +84,9 @@ void MainComponent::paint (Graphics& g)
 void MainComponent::resized()
 {
     auto r = getLocalBounds();
+   #if ! JUCE_MAC
     menuBar.setBounds (r.removeFromTop (LookAndFeel::getDefaultLookAndFeel().getDefaultMenuBarHeight()));
+   #endif
     transport.setBounds (r.removeFromTop (60));
 
     mixer.setVisible (mixerVisible);
@@ -562,7 +573,10 @@ void MainComponent::loadProjectFile (const File& f)
     rebuildTracks();
     syncControls();
     if (ok)
-        MessageManager::callAsync ([sp = SafePointer<MainComponent> (this)] { if (sp != nullptr) sp->arrange.zoomToFit(); });
+        {
+        SafePointer<MainComponent> sp (this);
+        MessageManager::callAsync ([sp] { if (sp != nullptr) sp->arrange.zoomToFit(); });
+    }
     if (err.isNotEmpty())
         showMessage (ok ? "Opened with problems" : "Open failed", err);
 }
