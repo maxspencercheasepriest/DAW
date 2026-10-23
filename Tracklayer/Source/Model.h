@@ -1,10 +1,23 @@
 #pragma once
 
 #include "Theme.h"
+#include <bitset>
 
-// An audio region on the timeline. The whole file is held in memory.
+// One note inside a MIDI region. Times are seconds from the region's source origin.
+struct MidiNote
+{
+    double time = 0.0, length = 0.0;
+    int note = 60, velocity = 100;
+};
+
+// A region on the timeline: either audio (the whole file is held in memory)
+// or MIDI (a list of notes).
 struct Clip
 {
+    bool isMidi = false;
+    juce::String name;                                        // MIDI regions only
+    std::shared_ptr<const std::vector<MidiNote>> notes;       // MIDI regions only
+
     juce::File file;
     std::shared_ptr<const juce::AudioBuffer<float>> audio;
     std::shared_ptr<const std::vector<std::pair<float, float>>> peaks;   // min/max per peakBlock samples
@@ -17,7 +30,12 @@ struct Clip
     static constexpr int peakBlock = 256;
 
     double end() const        { return start + length; }
-    double fileLength() const { return audio != nullptr ? audio->getNumSamples() / fileSampleRate : 0.0; }
+    double fileLength() const
+    {
+        if (isMidi) return 1.0e7;   // MIDI regions can be stretched freely
+        return audio != nullptr ? audio->getNumSamples() / fileSampleRate : 0.0;
+    }
+    juce::String displayName() const { return isMidi ? name : file.getFileNameWithoutExtension(); }
 };
 
 using ClipPtr = std::shared_ptr<Clip>;
@@ -45,6 +63,25 @@ struct Track
     std::array<std::unique_ptr<juce::AudioPluginInstance>, numInserts> inserts;
     std::array<std::atomic<bool>, numInserts> bypassed {};
     std::array<juce::PluginDescription, numInserts> insertInfo;   // what each slot was loaded from
+
+    // Instrument tracks play MIDI regions and live MIDI through a synth plugin.
+    bool isInstrument = false;
+    std::unique_ptr<juce::AudioPluginInstance> instrument;
+    juce::PluginDescription instrumentInfo;
+
+    // slot -1 = the instrument, 0.. = Audio FX inserts
+    juce::AudioPluginInstance* pluginAt (int slot) const
+    {
+        if (slot < 0) return instrument.get();
+        return slot < numInserts ? inserts[(size_t) slot].get() : nullptr;
+    }
+
+    // notes currently held down on the instrument, per MIDI channel (audio thread only)
+    std::array<std::bitset<128>, 16> soundingNotes;
+
+    // MIDI recording (audio thread appends while recording)
+    struct RecordedMidi { double time; juce::uint8 b0, b1, b2; };
+    std::vector<RecordedMidi> recMidi;
 
     // metering: audio thread writes peaks, UI turns them into decaying display values
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f };

@@ -49,7 +49,7 @@ public:
 
     void open (const TrackPtr& t, int slot)
     {
-        auto* p = t->inserts[(size_t) slot].get();
+        auto* p = t->pluginAt (slot);
         if (p == nullptr)
             return;
 
@@ -81,6 +81,8 @@ public:
         for (auto& p : t.inserts)
             if (p != nullptr)
                 closeFor (p.get());
+        if (t.instrument != nullptr)
+            closeFor (t.instrument.get());
     }
 
     void closeAll() { windows.clear(); }

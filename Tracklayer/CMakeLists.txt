@@ -42,7 +42,12 @@ juce_add_gui_app(Tracklayer
 target_sources(Tracklayer PRIVATE
     Source/Main.cpp
     Source/Engine.cpp
-    Source/MainComponent.cpp)
+    Source/MainComponent.cpp
+    Source/BuiltIn.cpp)
+
+# Piano samples for Tracklayer Keys, compiled into the app
+# (Salamander Grand Piano by Alexander Holm, CC-BY 3.0)
+juce_add_binary_data(TracklayerData SOURCES Resources/piano.zip)
 
 target_compile_definitions(Tracklayer PRIVATE
     JUCE_WEB_BROWSER=0
@@ -64,8 +69,10 @@ endif()
 
 target_link_libraries(Tracklayer
     PRIVATE
+        TracklayerData
         juce::juce_audio_utils
         juce::juce_audio_processors
+        juce::juce_dsp
         juce::juce_audio_formats
         juce::juce_audio_devices
         juce::juce_gui_extra

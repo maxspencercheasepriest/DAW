@@ -3,122 +3,6 @@
 #include "ArrangeView.h"
 
 //==============================================================================
-// One insert slot: empty = click to choose a plugin; filled = click to open it.
-class InsertSlot : public juce::Component, public juce::SettableTooltipClient
-{
-public:
-    InsertSlot (AppContext& c, TrackPtr t, int s) : ctx (c), track (std::move (t)), slot (s)
-    {
-        Theme::noFocus (*this);
-    }
-
-    void paint (juce::Graphics& g) override
-    {
-        auto r = getLocalBounds().toFloat().reduced (0.5f);
-        auto* p = track->inserts[(size_t) slot].get();
-        const bool byp = track->bypassed[(size_t) slot].load();
-
-        if (p == nullptr)
-        {
-            g.setColour (isMouseOver() ? Theme::panelLight : Theme::panelDark);
-            g.fillRoundedRectangle (r, 2.0f);
-            g.setColour (juce::Colour (0xff3a3a40));
-            g.drawRoundedRectangle (r, 2.0f, 1.0f);
-            return;
-        }
-
-        g.setColour (byp ? juce::Colour (0xff3a3a40) : juce::Colour (0xff3b5f86).brighter (isMouseOver() ? 0.1f : 0.0f));
-        g.fillRoundedRectangle (r, 2.0f);
-        g.setColour (byp ? Theme::textDim : juce::Colours::white);
-        g.setFont (Theme::font (11.0f, true));
-        g.drawFittedText (p->getName(), getLocalBounds().reduced (3, 0), juce::Justification::centred, 1, 0.8f);
-    }
-
-    void mouseEnter (const juce::MouseEvent&) override { repaint(); }
-    void mouseExit (const juce::MouseEvent&) override  { repaint(); }
-
-    void mouseUp (const juce::MouseEvent& e) override
-    {
-        if (! getLocalBounds().contains (e.getPosition()))
-            return;
-
-        auto* p = track->inserts[(size_t) slot].get();
-        if (p == nullptr || e.mods.isPopupMenu())
-            showMenu (p != nullptr);
-        else
-            ctx.openPlugin (track, slot);
-    }
-
-    void refresh()
-    {
-        auto* p = track->inserts[(size_t) slot].get();
-        setTooltip (p == nullptr ? "Click to add an effect plugin"
-                                 : p->getName() + " - click to open, right-click for options");
-        repaint();
-    }
-
-private:
-    void showMenu (bool filled)
-    {
-        juce::PopupMenu m;
-        auto types = ctx.engine.getEffectPlugins();
-        const auto* current = track->inserts[(size_t) slot].get();
-
-        if (filled)
-        {
-            m.addItem (1, "Open");
-            m.addItem (2, "Bypass", true, track->bypassed[(size_t) slot].load());
-            m.addItem (3, "Remove");
-            m.addSeparator();
-        }
-
-        juce::PopupMenu pluginMenu;
-        juce::KnownPluginList::addToMenu (pluginMenu, types, juce::KnownPluginList::sortByManufacturer,
-                                          current != nullptr ? current->getPluginDescription().createIdentifierString() : juce::String());
-        if (types.isEmpty())
-            m.addItem (4, "No plugins found - open Plugin Manager...");
-        else if (filled)
-            m.addSubMenu ("Replace With", pluginMenu);
-        else
-            for (juce::PopupMenu::MenuItemIterator it (pluginMenu); it.next();)
-                m.addItem (it.getItem());
-
-        m.addSeparator();
-        m.addItem (5, "Plugin Manager...");
-
-        juce::Component::SafePointer<InsertSlot> safe (this);
-        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this), [safe, types] (int result)
-        {
-            if (safe == nullptr || result == 0)
-                return;
-            auto& self = *safe;
-
-            switch (result)
-            {
-                case 1: self.ctx.openPlugin (self.track, self.slot); return;
-                case 2:
-                    self.track->bypassed[(size_t) self.slot] = ! self.track->bypassed[(size_t) self.slot].load();
-                    self.ctx.engine.dirty = true;
-                    self.repaint();
-                    return;
-                case 3: self.ctx.removePlugin (self.track, self.slot); return;
-                case 4:
-                case 5: self.ctx.runCommand (cmdPluginManager); return;
-                default: break;
-            }
-
-            const int idx = juce::KnownPluginList::getIndexChosenByMenu (types, result);
-            if (idx >= 0)
-                self.ctx.loadPlugin (self.track, self.slot, types.getReference (idx));
-        });
-    }
-
-    AppContext& ctx;
-    TrackPtr track;
-    int slot;
-};
-
-//==============================================================================
 // One mixer channel strip. A null track means the Stereo Out (master) strip.
 class ChannelStrip : public juce::Component
 {
@@ -173,7 +57,16 @@ public:
             input.onChange = [this] { applyInputChoice (input.getSelectedId(), *track); ctx.engine.dirty = true; };
             input.setTooltip ("Input channel");
             Theme::noFocus (input);
-            addAndMakeVisible (input);
+            if (track->isInstrument)
+            {
+                instrumentSlot = std::make_unique<InsertSlot> (ctx, track, -1);
+                addAndMakeVisible (*instrumentSlot);
+                monB.setVisible (false);
+            }
+            else
+            {
+                addAndMakeVisible (input);
+            }
             refreshInputs();
 
             for (int i = 0; i < numInserts; ++i)
@@ -209,6 +102,8 @@ public:
             monB.setToggleState (track->monitor.load(), juce::dontSendNotification);
             for (auto& s : slots)
                 s->refresh();
+            if (instrumentSlot != nullptr)
+                instrumentSlot->refresh();
         }
         repaint();
     }
@@ -286,6 +181,8 @@ public:
             }
             r.removeFromTop (4);
             input.setBounds (r.removeFromTop (22));
+            if (instrumentSlot != nullptr)
+                instrumentSlot->setBounds (input.getBounds().reduced (0, 2));
             r.removeFromTop (4);
             pan.setBounds (r.removeFromTop (42).withSizeKeepingCentre (42, 42));
             panText = r.removeFromTop (14);
@@ -318,6 +215,7 @@ private:
     juce::TextButton muteB, soloB, armB, monB;
     juce::ComboBox input;
     std::vector<std::unique_ptr<InsertSlot>> slots;
+    std::unique_ptr<InsertSlot> instrumentSlot;
     juce::Rectangle<int> nameArea, dbArea, panText, meterArea, g_labelArea;
 };
 

@@ -16,6 +16,13 @@ public:
     juce::AudioPluginFormatManager pluginFormats;
     juce::KnownPluginList knownPlugins;
     juce::Array<juce::PluginDescription> getEffectPlugins() const;
+    juce::Array<juce::PluginDescription> getInstrumentPlugins() const;
+
+    // ---- MIDI input ---------------------------------------------------
+    juce::MidiMessageCollector midiCollector;      // all enabled MIDI inputs feed this
+    std::atomic<Track*> midiFocus { nullptr };      // the selected track also plays live MIDI
+    std::atomic<int> midiActivity { 0 };            // bumps whenever MIDI arrives (for the UI light)
+    void enableAllMidiInputs();
 
     /** Puts a plugin in a slot (nullptr empties it). Returns the plugin it replaced,
         which the caller must delete after closing its editor window. */
@@ -59,7 +66,7 @@ public:
     juce::int64 getRecordingStart (const Track&) const;
 
     // ---- editing ------------------------------------------------------
-    TrackPtr addTrack (juce::String name = {});
+    TrackPtr addTrack (juce::String name = {}, bool instrument = false);
     void removeTrack (const TrackPtr&);
     int indexOf (const TrackPtr&) const;
     TrackPtr findOwner (const ClipPtr&) const;
@@ -94,7 +101,11 @@ private:
     void processBlock (const float* const* in, int numIn, int inOffset, int numSamples);
     void renderSegment (juce::AudioBuffer<float>& out, int outOffset, int num, juce::int64 pos, double sr,
                         const float* const* in, int numIn, int inOffset,
-                        bool live, bool playClips, bool rec);
+                        bool live, bool playClips, bool rec,
+                        const juce::MidiBuffer* liveMidi = nullptr, int liveMidiOffset = 0, bool flushNotes = false);
+    void renderInstrument (Track&, int num, juce::int64 pos, double sr, bool playClips, bool rec,
+                           const juce::MidiBuffer* liveMidi, int liveMidiOffset, bool flushNotes, bool takesLive);
+    ClipPtr buildMidiClip (Track&, double sr);
     void renderMetronome (juce::AudioBuffer<float>& out, int outOffset, int num, juce::int64 pos, double sr);
     bool startRecording();
     void finishRecording();
@@ -107,7 +118,9 @@ private:
 
     juce::TimeSliceThread writerThread { "Tracklayer recorder" };
     juce::AudioBuffer<float> mixBuffer, trackBuffer, silence, pluginBuffer;
-    juce::MidiBuffer pluginMidi;
+    juce::MidiBuffer pluginMidi, liveMidi;
+    std::atomic<bool> jumped { true };     // transport moved: silence hanging notes
+    bool wasPlaying = false;
     int currentBlockSize = 512;
     int recordLatencySamples = 0;
 

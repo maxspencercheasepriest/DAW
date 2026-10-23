@@ -1,6 +1,6 @@
 #pragma once
 
-#include "AppContext.h"
+#include "InsertSlot.h"
 
 //==============================================================================
 // Small toggle button used on track headers and channel strips.
@@ -79,7 +79,17 @@ public:
         input.setTooltip ("Input channel");
         input.onChange = [this] { applyInputChoice (input.getSelectedId(), *track); ctx.engine.dirty = true; };
         Theme::noFocus (input);
-        addAndMakeVisible (input);
+
+        if (track->isInstrument)
+        {
+            instrumentSlot = std::make_unique<InsertSlot> (ctx, track, -1);
+            addAndMakeVisible (*instrumentSlot);
+            monB.setVisible (false);   // instruments always hear their keyboard when selected or armed
+        }
+        else
+        {
+            addAndMakeVisible (input);
+        }
 
         volume.setSliderStyle (juce::Slider::LinearHorizontal);
         volume.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -105,6 +115,8 @@ public:
 
     void sync()
     {
+        if (instrumentSlot != nullptr)
+            instrumentSlot->refresh();
         muteB.setToggleState (track->mute.load(), juce::dontSendNotification);
         soloB.setToggleState (track->solo.load(), juce::dontSendNotification);
         armB.setToggleState (track->armed.load(), juce::dontSendNotification);
@@ -156,6 +168,8 @@ public:
         }
         row.removeFromLeft (4);
         input.setBounds (row);
+        if (instrumentSlot != nullptr)
+            instrumentSlot->setBounds (row.reduced (0, 1));
 
         r.removeFromTop (5);
         volume.setBounds (r.removeFromTop (20));
@@ -174,6 +188,7 @@ private:
     juce::TextButton muteB, soloB, armB, monB;
     juce::ComboBox input;
     juce::Slider volume;
+    std::unique_ptr<InsertSlot> instrumentSlot;
 };
 
 //==============================================================================
@@ -490,15 +505,45 @@ private:
             auto textArea = hdr.reduced (5.0f, 0.0f);
             if (textArea.getX() < 0.0f)
                 textArea.setLeft (2.0f);
-            g.drawText (c.file.getFileNameWithoutExtension(), textArea, juce::Justification::centredLeft, true);
+            g.drawText (c.displayName(), textArea, juce::Justification::centredLeft, true);
         }
 
         auto body = r.withTrimmedTop (16.0f).reduced (0.0f, 2.0f);
         g.setColour (col.brighter (0.7f).withAlpha (0.9f));
-        drawWave (g, c, body);
+        if (c.isMidi)
+            drawNotes (g, c, body);
+        else
+            drawWave (g, c, body);
 
         g.setColour (selected ? juce::Colours::white : col.darker (0.4f));
         g.drawRoundedRectangle (r, 4.0f, selected ? 1.6f : 1.0f);
+    }
+
+    void drawNotes (juce::Graphics& g, const Clip& c, juce::Rectangle<float> body)
+    {
+        if (c.notes == nullptr || c.notes->empty() || body.getHeight() < 4.0f)
+            return;
+
+        int lo = 127, hi = 0;
+        for (auto& n : *c.notes) { lo = juce::jmin (lo, n.note); hi = juce::jmax (hi, n.note); }
+        lo = juce::jmax (0, lo - 2);
+        hi = juce::jmin (127, hi + 2);
+        const float rowH = juce::jlimit (1.5f, 6.0f, body.getHeight() / (float) (hi - lo + 1));
+        const double origin = c.start - c.offset;
+
+        g.saveState();
+        g.reduceClipRegion (body.toNearestInt());
+        for (auto& n : *c.notes)
+        {
+            const double on = origin + n.time;
+            if (on + n.length < c.start || on >= c.end())
+                continue;
+            const float x0 = ctx.view.secToX (juce::jmax (on, c.start));
+            const float x1 = ctx.view.secToX (juce::jmin (on + n.length, c.end()));
+            const float y = body.getBottom() - (float) (n.note - lo + 1) * (body.getHeight() / (float) (hi - lo + 1));
+            g.fillRect (x0, y, juce::jmax (1.5f, x1 - x0), rowH);
+        }
+        g.restoreState();
     }
 
     void drawWave (juce::Graphics& g, const Clip& c, juce::Rectangle<float> body)
@@ -539,7 +584,8 @@ private:
             m.addSeparator();
         }
         m.addItem ("Import Audio File...", [this] { ctx.runCommand (cmdImportAudio); });
-        m.addItem ("New Track", [this] { ctx.runCommand (cmdNewTrack); });
+        m.addItem ("New Audio Track", [this] { ctx.runCommand (cmdNewTrack); });
+        m.addItem ("New Instrument Track", [this] { ctx.runCommand (cmdNewInstrumentTrack); });
         m.showMenuAsync (juce::PopupMenu::Options());
     }
 
@@ -748,8 +794,14 @@ public:
         hbar.setAutoHide (false);
         Theme::noFocus (hbar);
 
-        addTrackB.setTooltip ("New track (Ctrl+Alt+N)");
-        addTrackB.onClick = [this] { ctx.runCommand (cmdNewTrack); };
+        addTrackB.setTooltip ("New track");
+        addTrackB.onClick = [this]
+        {
+            juce::PopupMenu m;
+            m.addItem ("New Audio Track", [this] { ctx.runCommand (cmdNewTrack); });
+            m.addItem ("New Instrument Track", [this] { ctx.runCommand (cmdNewInstrumentTrack); });
+            m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&addTrackB));
+        };
         Theme::noFocus (addTrackB);
 
         auto viewChanged = [this] { updateScroll(); repaintTimeline(); };

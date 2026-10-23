@@ -28,7 +28,7 @@ MainComponent::MainComponent (ApplicationProperties& props) : properties (props)
     ctx.openPlugin   = [this] (const TrackPtr& t, int s) { pluginWindows.open (t, s); };
     ctx.removePlugin = [this] (const TrackPtr& t, int s)
     {
-        pluginWindows.closeFor (t->inserts[(size_t) s].get());
+        pluginWindows.closeFor (t->pluginAt (s));
         disposeLater (engine.setInsert (*t, s, nullptr));
         syncControls();
         updateTitle();
@@ -50,6 +50,10 @@ MainComponent::MainComponent (ApplicationProperties& props) : properties (props)
     auto saved = properties.getUserSettings()->getXmlValue ("audioDeviceState");
     const auto err = engine.deviceManager.initialise (2, 2, saved.get(), true);
     engine.deviceManager.addChangeListener (this);
+
+    // MIDI keyboards: switch on every connected input and feed them to the engine.
+    engine.enableAllMidiInputs();
+    engine.deviceManager.addMidiInputDeviceCallback ({}, &engine.midiCollector);
 
     if (auto* dev = engine.deviceManager.getCurrentAudioDevice())
     {
@@ -83,6 +87,7 @@ MainComponent::~MainComponent()
     stopTimer();
     saveDeviceState();
     engine.deviceManager.removeChangeListener (this);
+    engine.deviceManager.removeMidiInputDeviceCallback ({}, &engine.midiCollector);
     engine.knownPlugins.removeChangeListener (this);
     pluginManager.reset();
     pluginWindows.closeAll();
@@ -140,6 +145,14 @@ void MainComponent::timerCallback()
 
     if (++meterDivider % 15 == 0)
         updateTitle();
+
+    // The selected instrument track plays whatever you play on the keyboard.
+    auto sel = ctx.view.selectedTrack;
+    engine.midiFocus = (sel != nullptr && sel->isInstrument) ? sel.get() : nullptr;
+
+    // Pick up keyboards plugged in while the app is running.
+    if (meterDivider % 90 == 0)
+        engine.enableAllMidiInputs();
 
     // keep DAW shortcuts working if focus got lost (e.g. after a dialog)
     if (Component::getCurrentlyFocusedComponent() == nullptr && isShowing() && hasKeyboardFocus (true) == false
@@ -301,6 +314,39 @@ void MainComponent::runCommand (int cmd)
             break;
         }
 
+        case cmdNewInstrumentTrack:
+        {
+            auto t = e.addTrack ({}, true);
+            v.selectedTrack = t;
+            rebuildTracks();
+
+            // Go straight to choosing a synth, like Logic does.
+            auto instruments = e.getInstrumentPlugins();
+            if (instruments.isEmpty())
+            {
+                showMessage ("Instrument track",
+                             "No instrument plugins have been found yet.\n\n"
+                             "Open File > Plugin Manager and scan for VST3 plugins, then click the "
+                             "track's \"Choose instrument...\" box.");
+            }
+            else
+            {
+                PopupMenu m;
+                KnownPluginList::addToMenu (m, instruments, KnownPluginList::sortByManufacturer);
+                SafePointer<MainComponent> safe (this);
+                m.showMenuAsync (PopupMenu::Options().withTargetComponent (&arrange)
+                                     .withMousePosition(),
+                                 [safe, t, instruments] (int result)
+                {
+                    if (safe == nullptr || result == 0) return;
+                    const int idx = KnownPluginList::getIndexChosenByMenu (instruments, result);
+                    if (idx >= 0)
+                        safe->loadPluginInto (t, -1, instruments.getReference (idx));
+                });
+            }
+            break;
+        }
+
         case cmdDeleteTrack:
             if (v.selectedTrack != nullptr && ! e.isRecording())
             {
@@ -397,6 +443,7 @@ bool MainComponent::keyPressed (const KeyPress& k)
         { KeyPress (KeyPress::backspaceKey, ctrl, 0),  cmdDeleteTrack },
         { KeyPress ('t', ctrl, 0),                     cmdSplitAtPlayhead },
         { KeyPress ('n', ctrl | alt, 0),               cmdNewTrack },
+        { KeyPress ('s', ctrl | alt, 0),               cmdNewInstrumentTrack },
         { KeyPress ('n', ctrl, 0),                     cmdNewProject },
         { KeyPress ('o', ctrl, 0),                     cmdOpen },
         { KeyPress ('s', ctrl, 0),                     cmdSave },
@@ -470,6 +517,7 @@ PopupMenu MainComponent::getMenuForIndex (int index, const String&)
 
         case 2:
             addItem (m, cmdNewTrack, "New Audio Track", "Ctrl+Alt+N");
+            addItem (m, cmdNewInstrumentTrack, "New Instrument Track", "Ctrl+Alt+S");
             addItem (m, cmdDeleteTrack, "Delete Track", "Ctrl+Delete", ctx.view.selectedTrack != nullptr && ! rec);
             break;
 
@@ -506,7 +554,8 @@ PopupMenu MainComponent::getMenuForIndex (int index, const String&)
                              "Z  Zoom to fit,  Ctrl+mouse wheel to zoom\n"
                              "Ctrl+T  Split region at playhead\n"
                              "Delete  Delete region\n"
-                             "Ctrl+Alt+N  New track\n"
+                             "Ctrl+Alt+N  New audio track\n"
+                             "Ctrl+Alt+S  New instrument track\n"
                              "Ctrl+I  Import audio,  Ctrl+B  Bounce mix\n\n"
                              "Hold Alt while dragging to turn off snapping.\n"
                              "Drag in the top strip of the ruler to set a cycle area.\n"
@@ -518,7 +567,7 @@ PopupMenu MainComponent::getMenuForIndex (int index, const String&)
             });
             m.addItem ("About Tracklayer", [this]
             {
-                showMessage ("About Tracklayer", "Tracklayer 0.2\nA small multitrack recorder built with JUCE.\n\nVST is a trademark of Steinberg Media Technologies GmbH.");
+                showMessage ("About Tracklayer", "Tracklayer 0.2\nA small multitrack recorder built with JUCE.\n\nTracklayer Keys uses the Salamander Grand Piano samples by Alexander Holm,\nlicensed under CC-BY 3.0.\n\nVST is a trademark of Steinberg Media Technologies GmbH.");
             });
             break;
 
@@ -676,8 +725,8 @@ void MainComponent::exportMix()
 
 void MainComponent::showSettings()
 {
-    auto* selector = new AudioDeviceSelectorComponent (engine.deviceManager, 0, 32, 0, 2, false, false, true, false);
-    selector->setSize (560, 460);
+    auto* selector = new AudioDeviceSelectorComponent (engine.deviceManager, 0, 32, 0, 2, true, false, true, false);
+    selector->setSize (560, 560);
 
     DialogWindow::LaunchOptions o;
     o.content.setOwned (selector);
@@ -725,7 +774,7 @@ void MainComponent::loadPluginInto (const TrackPtr& track, int slot, const Plugi
                 return;
             }
 
-            self.pluginWindows.closeFor (t->inserts[(size_t) slot].get());
+            self.pluginWindows.closeFor (t->pluginAt (slot));
             self.disposeLater (self.engine.setInsert (*t, slot, std::move (plugin), desc));
             self.syncControls();
             self.updateTitle();

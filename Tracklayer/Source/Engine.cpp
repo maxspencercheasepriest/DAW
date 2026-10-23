@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "BuiltIn.h"
 
 using namespace juce;
 
@@ -13,8 +14,11 @@ Engine::Engine()
 {
     formatManager.registerBasicFormats();
     pluginFormats.addDefaultFormats();
+    pluginFormats.addFormat (new BuiltIn::Format());
     pluginBuffer.setSize (32, pluginMaxBlock);
-    pluginMidi.ensureSize (256);
+    pluginMidi.ensureSize (4096);
+    liveMidi.ensureSize (4096);
+    midiCollector.reset (44100.0);
     writerThread.startThread();
 
     mixBuffer.setSize (2, maxBlock);
@@ -53,6 +57,7 @@ void Engine::play()
         if (pos < cycleStart || pos >= cycleEnd)
             setPosition (cycleStart);
     }
+    jumped = true;
     playing = true;
 }
 
@@ -60,6 +65,7 @@ void Engine::stop()
 {
     const bool wasRecording = recording.load();
     playing = false;
+    jumped = true;
     if (wasRecording)
         finishRecording();
 }
@@ -88,6 +94,7 @@ void Engine::setPosition (double seconds)
     if (recording)
         return;
     positionSamples = (int64) (jmax (0.0, seconds) * sampleRate.load());
+    jumped = true;
 }
 
 int64 Engine::getRecordingStart (const Track& t) const
@@ -116,22 +123,30 @@ bool Engine::startRecording()
         return false;
     }
 
+    std::vector<TrackPtr> armed, armedMidi;
+    for (auto& t : tracks)
+        if (t->armed)
+            (t->isInstrument ? armedMidi : armed).push_back (t);
+
+    if (armed.empty() && armedMidi.empty())
+    {
+        lastError = "Arm a track for recording first (the R button on the track).";
+        return false;
+    }
+
     const int numIn = dev->getActiveInputChannels().countNumberOfSetBits();
-    if (numIn == 0)
+    if (numIn == 0 && ! armed.empty())
     {
         lastError = "No input channels are enabled. Turn some on in Settings (Ctrl+,).";
         return false;
     }
 
-    std::vector<TrackPtr> armed;
-    for (auto& t : tracks)
-        if (t->armed)
-            armed.push_back (t);
-
-    if (armed.empty())
+    for (auto& t : armedMidi)
     {
-        lastError = "Arm a track for recording first (the R button on the track).";
-        return false;
+        const ScopedLock sl (lock);
+        t->recMidi.clear();
+        t->recMidi.reserve (200000);
+        t->recStart = -1;
     }
 
     const double sr = sampleRate.load();
@@ -176,14 +191,23 @@ void Engine::finishRecording()
     recording = false;
 
     std::vector<std::pair<TrackPtr, std::unique_ptr<AudioFormatWriter::ThreadedWriter>>> finished;
+    std::vector<std::pair<TrackPtr, ClipPtr>> midiTakes;
+    const double sr = sampleRate.load();
     {
         const ScopedLock sl (lock);   // waits for any in-flight audio callback
         for (auto& t : tracks)
+        {
             if (t->recWriter != nullptr)
                 finished.emplace_back (t, std::move (t->recWriter));
-    }
 
-    const double sr = sampleRate.load();
+            if (t->isInstrument && t->armed)
+                if (auto clip = buildMidiClip (*t, sr))
+                    midiTakes.emplace_back (t, clip);
+        }
+
+        for (auto& [t, clip] : midiTakes)
+            t->clips.push_back (clip);
+    }
 
     for (auto& [track, writer] : finished)
     {
@@ -218,13 +242,73 @@ void Engine::finishRecording()
         onRecordingFinished();
 }
 
+ClipPtr Engine::buildMidiClip (Track& t, double sr)
+{
+    const auto startSample = t.recStart.load();
+    if (startSample < 0)
+        return {};
+
+    const double start = (double) startSample / sr;
+    const double end = getPosition();
+    auto notes = std::make_shared<std::vector<MidiNote>>();
+
+    // Pair each note-on with the next note-off for the same key and channel.
+    std::array<std::array<double, 128>, 16> onTime;
+    std::array<std::array<int, 128>, 16> onVel;
+    for (auto& a : onTime) a.fill (-1.0);
+
+    auto close = [&] (int ch, int key, double when)
+    {
+        if (onTime[(size_t) ch][(size_t) key] < 0.0)
+            return;
+        const double t0 = onTime[(size_t) ch][(size_t) key];
+        notes->push_back ({ t0 - start, jmax (0.01, when - t0), key, onVel[(size_t) ch][(size_t) key] });
+        onTime[(size_t) ch][(size_t) key] = -1.0;
+    };
+
+    for (auto& ev : t.recMidi)
+    {
+        const int status = ev.b0 & 0xf0, ch = ev.b0 & 0x0f, key = ev.b1 & 0x7f;
+        if (status == 0x90 && ev.b2 > 0)
+        {
+            close (ch, key, ev.time);
+            onTime[(size_t) ch][(size_t) key] = ev.time;
+            onVel[(size_t) ch][(size_t) key] = ev.b2;
+        }
+        else if (status == 0x80 || (status == 0x90 && ev.b2 == 0))
+        {
+            close (ch, key, ev.time);
+        }
+    }
+    for (int ch = 0; ch < 16; ++ch)
+        for (int key = 0; key < 128; ++key)
+            close (ch, key, end);   // keys still held when recording stopped
+
+    t.recMidi.clear();
+    t.recMidi.shrink_to_fit();
+    if (notes->empty())
+        return {};
+
+    std::sort (notes->begin(), notes->end(), [] (const MidiNote& a, const MidiNote& b) { return a.time < b.time; });
+
+    auto clip = std::make_shared<Clip>();
+    clip->isMidi = true;
+    clip->name = t.name;
+    clip->notes = notes;
+    clip->start = start;
+    clip->offset = 0.0;
+    clip->length = jmax (end - start, notes->back().time + notes->back().length);
+    return clip;
+}
+
 //==============================================================================
 // Editing
 //==============================================================================
-TrackPtr Engine::addTrack (String name)
+TrackPtr Engine::addTrack (String name, bool instrument)
 {
     auto t = std::make_shared<Track>();
-    t->name = name.isNotEmpty() ? name : "Audio " + String ((int) tracks.size() + 1);
+    t->isInstrument = instrument;
+    t->name = name.isNotEmpty() ? name : (instrument ? "Inst " : "Audio ") + String ((int) tracks.size() + 1);
     t->colour = Theme::trackColour ((int) tracks.size());
 
     // Default each new track to the next mono input.
@@ -370,7 +454,7 @@ bool Engine::splitClip (const ClipPtr& c, double at)
 void Engine::moveClipToTrack (const ClipPtr& c, const TrackPtr& dest)
 {
     auto owner = findOwner (c);
-    if (owner == nullptr || dest == nullptr || owner == dest)
+    if (owner == nullptr || dest == nullptr || owner == dest || (c->isMidi && ! dest->isInstrument))
         return;
 
     const ScopedLock sl (lock);
@@ -467,8 +551,20 @@ bool Engine::saveProject (const File& file, String& error)
         for (auto& c : t->clips)
         {
             auto co = std::make_unique<DynamicObject>();
-            co->setProperty ("file", c->file.isAChildOf (dir) ? c->file.getRelativePathFrom (dir)
-                                                                : c->file.getFullPathName());
+            if (c->isMidi)
+            {
+                Array<var> noteList;
+                if (c->notes != nullptr)
+                    for (auto& nt : *c->notes)
+                        noteList.add (Array<var> { nt.time, nt.length, nt.note, nt.velocity });
+                co->setProperty ("name", c->name);
+                co->setProperty ("midi", noteList);
+            }
+            else
+            {
+                co->setProperty ("file", c->file.isAChildOf (dir) ? c->file.getRelativePathFrom (dir)
+                                                                    : c->file.getFullPathName());
+            }
             co->setProperty ("start", c->start);
             co->setProperty ("offset", c->offset);
             co->setProperty ("length", c->length);
@@ -495,6 +591,18 @@ bool Engine::saveProject (const File& file, String& error)
             pluginList.add (var (po.release()));
         }
         to->setProperty ("plugins", pluginList);
+
+        to->setProperty ("instrumentTrack", t->isInstrument);
+        if (t->instrument != nullptr)
+        {
+            MemoryBlock state;
+            t->instrument->getStateInformation (state);
+            auto io = std::make_unique<DynamicObject>();
+            auto desc = t->instrumentInfo.fileOrIdentifier.isNotEmpty() ? t->instrumentInfo : t->instrument->getPluginDescription();
+            io->setProperty ("description", desc.createXml()->toString (XmlElement::TextFormat().singleLine()));
+            io->setProperty ("state", state.toBase64Encoding());
+            to->setProperty ("instrument", var (io.release()));
+        }
         trackList.add (var (to.release()));
     }
     root->setProperty ("tracks", trackList);
@@ -546,6 +654,24 @@ bool Engine::loadProject (const File& file, String& error)
             {
                 for (auto& cv : *clips)
                 {
+                    if (auto* noteList = cv["midi"].getArray())
+                    {
+                        auto notes = std::make_shared<std::vector<MidiNote>>();
+                        for (auto& nv : *noteList)
+                            if (nv.size() >= 4)
+                                notes->push_back ({ (double) nv[0], (double) nv[1],
+                                                    jlimit (0, 127, (int) nv[2]), jlimit (1, 127, (int) nv[3]) });
+                        auto c = std::make_shared<Clip>();
+                        c->isMidi = true;
+                        c->name = cv["name"].toString();
+                        c->notes = notes;
+                        c->start  = (double) cv["start"];
+                        c->offset = jmax (0.0, (double) cv["offset"]);
+                        c->length = jmax (0.01, (double) cv["length"]);
+                        t->clips.push_back (c);
+                        continue;
+                    }
+
                     auto f = dir.getChildFile (cv["file"].toString());
                     String err;
                     auto c = f.existsAsFile() ? loadClip (f, err) : ClipPtr();
@@ -586,6 +712,31 @@ bool Engine::loadProject (const File& file, String& error)
                     t->inserts[(size_t) slot] = std::move (plug);
                     t->insertInfo[(size_t) slot] = desc;
                     t->bypassed[(size_t) slot] = (bool) pv.getProperty ("bypassed", false);
+                }
+            }
+
+            t->isInstrument = (bool) tv.getProperty ("instrumentTrack", false);
+            if (t->isInstrument && tv["instrument"].isObject())
+            {
+                auto iv = tv["instrument"];
+                PluginDescription desc;
+                auto xml = parseXML (iv["description"].toString());
+                if (xml != nullptr && desc.loadFromXml (*xml))
+                {
+                    String err;
+                    if (auto synth = createPlugin (desc, err))
+                    {
+                        MemoryBlock state;
+                        if (state.fromBase64Encoding (iv["state"].toString()) && state.getSize() > 0)
+                            synth->setStateInformation (state.getData(), (int) state.getSize());
+                        preparePlugin (*synth);
+                        t->instrument = std::move (synth);
+                        t->instrumentInfo = desc;
+                    }
+                    else
+                    {
+                        missing.addIfNotAlreadyThere ("Plugin: " + desc.name);
+                    }
                 }
             }
 
@@ -651,8 +802,11 @@ bool Engine::exportMix (const File& file, String& error)
     // Let effect tails (reverb, delay) ring out for up to 3 seconds.
     bool anyPlugins = false;
     for (auto& t : tracks)
+    {
         for (auto& p : t->inserts)
             anyPlugins = anyPlugins || p != nullptr;
+        anyPlugins = anyPlugins || t->instrument != nullptr;
+    }
     const auto total = (int64) std::ceil ((end + (anyPlugins ? 3.0 : 0.05)) * sr);
 
     // Holding the lock pauses the live audio callback (it outputs silence).
@@ -661,9 +815,13 @@ bool Engine::exportMix (const File& file, String& error)
     auto forEachPlugin = [this] (auto fn)
     {
         for (auto& t : tracks)
+        {
             for (auto& p : t->inserts)
                 if (p != nullptr)
                     fn (*p);
+            if (t->instrument != nullptr)
+                fn (*t->instrument);
+        }
     };
     forEachPlugin ([] (AudioPluginInstance& p) { p.setNonRealtime (true); p.reset(); });
 
@@ -671,7 +829,7 @@ bool Engine::exportMix (const File& file, String& error)
     {
         const int n = (int) jmin ((int64) block, total - pos);
         buf.clear();
-        renderSegment (buf, 0, n, pos, sr, nullptr, 0, 0, false, true, false);
+        renderSegment (buf, 0, n, pos, sr, nullptr, 0, 0, false, true, false, nullptr, 0, pos == 0);
         buf.applyGain (0, n, mv);
         writer->writeFromAudioSampleBuffer (buf, 0, n);
     }
@@ -698,10 +856,16 @@ void Engine::audioDeviceAboutToStart (AudioIODevice* device)
     silence.clear();
     currentBlockSize = jmin (maxBlock, jmax (16, device->getCurrentBufferSizeSamples()));
 
+    midiCollector.reset (newRate);
+
     for (auto& t : tracks)
+    {
         for (auto& p : t->inserts)
             if (p != nullptr)
                 preparePlugin (*p);
+        if (t->instrument != nullptr)
+            preparePlugin (*t->instrument);
+    }
 }
 
 void Engine::audioDeviceStopped() {}
@@ -709,9 +873,37 @@ void Engine::audioDeviceStopped() {}
 //==============================================================================
 // Plugins
 //==============================================================================
+Array<PluginDescription> Engine::getInstrumentPlugins() const
+{
+    Array<PluginDescription> result;
+    for (auto& d : BuiltIn::getTypes())
+        if (d.isInstrument)
+            result.add (d);
+    for (auto& d : knownPlugins.getTypes())
+        if (d.isInstrument)
+            result.add (d);
+    return result;
+}
+
+void Engine::enableAllMidiInputs()
+{
+    for (auto& d : MidiInput::getAvailableDevices())
+    {
+        // Skip DAW-control ports (e.g. "Komplete Kontrol DAW - 1"): they carry
+        // controller-integration messages, not notes.
+        if (d.name.containsIgnoreCase ("DAW"))
+            continue;
+        if (! deviceManager.isMidiInputDeviceEnabled (d.identifier))
+            deviceManager.setMidiInputDeviceEnabled (d.identifier, true);
+    }
+}
+
 Array<PluginDescription> Engine::getEffectPlugins() const
 {
     Array<PluginDescription> result;
+    for (auto& d : BuiltIn::getTypes())
+        if (! d.isInstrument)
+            result.add (d);
     for (auto& d : knownPlugins.getTypes())
         if (! d.isInstrument)
             result.add (d);
@@ -772,11 +964,25 @@ std::unique_ptr<AudioPluginInstance> Engine::createPlugin (PluginDescription& d,
 std::unique_ptr<AudioPluginInstance> Engine::setInsert (Track& t, int slot, std::unique_ptr<AudioPluginInstance> p,
                                                       const PluginDescription& desc)
 {
-    if (slot < 0 || slot >= numInserts)
+    if (slot < -1 || slot >= numInserts || (slot == -1 && ! t.isInstrument))
         return p;
 
     if (p != nullptr)
         preparePlugin (*p);
+
+    if (slot == -1)
+    {
+        {
+            const ScopedLock sl (lock);
+            std::swap (t.instrument, p);
+            t.instrumentInfo = desc;
+            for (auto& ch : t.soundingNotes) ch.reset();
+        }
+        if (p != nullptr)
+            p->releaseResources();
+        dirty = true;
+        return p;
+    }
 
     {
         const ScopedLock sl (lock);
@@ -818,6 +1024,12 @@ void Engine::processBlock (const float* const* in, int numIn, int inOffset, int 
 {
     mixBuffer.clear (0, n);
 
+    // Always drain incoming MIDI so it never piles up.
+    liveMidi.clear();
+    midiCollector.removeNextBlockOfMessages (liveMidi, n);
+    if (! liveMidi.isEmpty())
+        ++midiActivity;
+
     const ScopedTryLock sl (lock);
     if (! sl.isLocked())
         return;   // the UI is restructuring the project; output silence this block
@@ -827,6 +1039,9 @@ void Engine::processBlock (const float* const* in, int numIn, int inOffset, int 
     const bool isRec  = recording.load();
     auto startPos = positionSamples.load();
     auto pos = startPos;
+
+    bool flush = jumped.exchange (false) || isPlay != wasPlaying;
+    wasPlaying = isPlay;
 
     int done = 0;
     while (done < n)
@@ -839,7 +1054,9 @@ void Engine::processBlock (const float* const* in, int numIn, int inOffset, int 
         if (cyc && pos < ce && pos + chunk > ce)
             chunk = (int) (ce - pos);
 
-        renderSegment (mixBuffer, done, chunk, pos, sr, in, numIn, inOffset + done, true, isPlay, isRec);
+        renderSegment (mixBuffer, done, chunk, pos, sr, in, numIn, inOffset + done, true, isPlay, isRec,
+                       &liveMidi, done, flush);
+        flush = false;
         if (isPlay && metronomeOn.load())
             renderMetronome (mixBuffer, done, chunk, pos, sr);
 
@@ -848,7 +1065,10 @@ void Engine::processBlock (const float* const* in, int numIn, int inOffset, int 
         {
             pos += chunk;
             if (cyc && pos >= ce)
+            {
                 pos = cs;
+                flush = true;   // looping back: release notes from the end of the cycle
+            }
         }
     }
 
@@ -863,7 +1083,8 @@ void Engine::processBlock (const float* const* in, int numIn, int inOffset, int 
 
 void Engine::renderSegment (AudioBuffer<float>& out, int outOffset, int num, int64 pos, double sr,
                             const float* const* in, int numIn, int inOffset,
-                            bool live, bool playClips, bool rec)
+                            bool live, bool playClips, bool rec,
+                            const MidiBuffer* liveMidiIn, int liveMidiOffset, bool flushNotes)
 {
     if (num <= 0)
         return;
@@ -874,6 +1095,8 @@ void Engine::renderSegment (AudioBuffer<float>& out, int outOffset, int num, int
     bool anySolo = false;
     for (auto& t : tracks)
         anySolo = anySolo || t->solo.load();
+
+    Track* focus = midiFocus.load();
 
     for (auto& tp : tracks)
     {
@@ -926,7 +1149,7 @@ void Engine::renderSegment (AudioBuffer<float>& out, int outOffset, int num, int
         }
 
         // ---- live input: recording and monitoring ----
-        if (live && t.armed.load() && in != nullptr && numIn > 0)
+        if (live && ! t.isInstrument && t.armed.load() && in != nullptr && numIn > 0)
         {
             const int ch = t.inputChannel.load();
             const bool stereo = t.stereoInput.load();
@@ -950,6 +1173,11 @@ void Engine::renderSegment (AudioBuffer<float>& out, int outOffset, int num, int
                 if (inR != nullptr) FloatVectorOperations::add (trackBuffer.getWritePointer (1), inR, num);
             }
         }
+
+        // ---- instrument (MIDI regions + live MIDI -> synth) ----
+        if (t.isInstrument)
+            renderInstrument (t, num, pos, sr, playClips, rec, live ? liveMidiIn : nullptr, liveMidiOffset,
+                              flushNotes, live && (t.armed.load() || &t == focus));
 
         // ---- insert effects ----
         for (size_t s = 0; s < (size_t) numInserts; ++s)
@@ -1010,6 +1238,131 @@ void Engine::renderSegment (AudioBuffer<float>& out, int outOffset, int num, int
             out.addFrom (0, outOffset, trackBuffer, 0, 0, num, gL);
             out.addFrom (1, outOffset, trackBuffer, 1, 0, num, gR);
         }
+    }
+}
+
+void Engine::renderInstrument (Track& t, int num, int64 pos, double sr, bool playClips, bool rec,
+                               const MidiBuffer* live, int liveOffset, bool flushNotes, bool takesLive)
+{
+    auto* synth = t.instrument.get();
+    auto& mb = pluginMidi;
+    mb.clear();
+
+    auto noteOff = [&t, &mb] (int ch, int key, int at)
+    {
+        if (! t.soundingNotes[(size_t) ch][(size_t) key]) return;
+        t.soundingNotes[(size_t) ch].reset ((size_t) key);
+        mb.addEvent (MidiMessage::noteOff (ch + 1, key), at);
+    };
+
+    auto noteOn = [&t, &mb, &noteOff] (int ch, int key, int vel, int at)
+    {
+        noteOff (ch, key, at);   // retrigger cleanly
+        t.soundingNotes[(size_t) ch].set ((size_t) key);
+        mb.addEvent (MidiMessage::noteOn (ch + 1, key, (uint8) jlimit (1, 127, vel)), at);
+    };
+
+    // Transport moved or looped: release everything that's sounding.
+    if (flushNotes)
+    {
+        for (int ch = 0; ch < 16; ++ch)
+        {
+            if (t.soundingNotes[(size_t) ch].none()) continue;
+            for (int key = 0; key < 128; ++key)
+                noteOff (ch, key, 0);
+            mb.addEvent (MidiMessage::controllerEvent (ch + 1, 64, 0), 0);   // sustain pedal up
+        }
+    }
+
+    // ---- notes from MIDI regions ----
+    if (playClips)
+    {
+        const double startSec = (double) pos / sr;
+        const double endSec = (double) (pos + num) / sr;
+        auto sampleAt = [startSec, sr] (double sec) { return (int) std::ceil ((sec - startSec) * sr - 1.0e-6); };
+
+        for (int pass = 0; pass < 2; ++pass)   // note-offs first, then note-ons
+        {
+            for (auto& cp : t.clips)
+            {
+                const auto& c = *cp;
+                if (! c.isMidi || c.notes == nullptr || c.end() <= startSec || c.start >= endSec)
+                    continue;
+
+                const double origin = c.start - c.offset;
+                for (auto& nt : *c.notes)
+                {
+                    const double on = origin + nt.time;
+                    if (on < c.start - 1.0e-9 || on >= c.end())
+                        continue;   // trimmed away
+                    const double off = jmin (on + nt.length, c.end());
+
+                    if (pass == 0)
+                    {
+                        const int s = sampleAt (off);
+                        if (s >= 0 && s < num) noteOff (0, nt.note, s);
+                    }
+                    else
+                    {
+                        const int s = sampleAt (on);
+                        if (s >= 0 && s < num) noteOn (0, nt.note, nt.velocity, s);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- live MIDI from the keyboard ----
+    if (takesLive && live != nullptr)
+    {
+        const bool recordThis = rec && t.armed.load();
+        if (recordThis && t.recStart.load() < 0)
+            t.recStart = pos;
+
+        for (const auto meta : *live)
+        {
+            const int at = meta.samplePosition - liveOffset;
+            if (at < 0 || at >= num)
+                continue;
+
+            const auto msg = meta.getMessage();
+            if (msg.isNoteOn())
+                noteOn (msg.getChannel() - 1, msg.getNoteNumber(), msg.getVelocity(), at);
+            else if (msg.isNoteOff())
+                noteOff (msg.getChannel() - 1, msg.getNoteNumber(), at);
+            else if (! msg.isSysEx())
+                mb.addEvent (msg, at);   // sustain, pitch bend, mod wheel...
+
+            if (recordThis && (msg.isNoteOnOrOff()) && t.recMidi.size() < t.recMidi.capacity())
+            {
+                auto* raw = msg.getRawData();
+                t.recMidi.push_back ({ (double) (pos + at) / sr, raw[0], raw[1], raw[2] });
+            }
+        }
+    }
+    else if (rec && t.armed.load() && t.recStart.load() < 0)
+    {
+        t.recStart = pos;
+    }
+
+    if (synth == nullptr || num > pluginMaxBlock)
+        return;
+
+    const int outs = synth->getTotalNumOutputChannels();
+    const int chans = jlimit (1, pluginBuffer.getNumChannels(), jmax (outs, synth->getTotalNumInputChannels(), 2));
+    AudioBuffer<float> view (pluginBuffer.getArrayOfWritePointers(), chans, num);
+    view.clear();
+    synth->processBlock (view, mb);
+
+    if (outs >= 2)
+    {
+        trackBuffer.addFrom (0, 0, view, 0, 0, num);
+        trackBuffer.addFrom (1, 0, view, 1, 0, num);
+    }
+    else if (outs == 1)
+    {
+        trackBuffer.addFrom (0, 0, view, 0, 0, num);
+        trackBuffer.addFrom (1, 0, view, 0, 0, num);
     }
 }
 

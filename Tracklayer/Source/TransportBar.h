@@ -226,6 +226,17 @@ public:
             g.setColour (Theme::record);
             g.fillEllipse ((float) getWidth() - 14.0f, 6.0f, 8.0f, 8.0f);
         }
+
+        // MIDI in light: flashes while notes or controllers arrive.
+        const auto now = juce::Time::getMillisecondCounter();
+        const int act = engine.midiActivity.load();
+        if (act != lastMidiActivity) { lastMidiActivity = act; midiLitUntil = now + 150; }
+        const bool lit = now < midiLitUntil;
+        auto led = juce::Rectangle<float> ((float) getWidth() - 44.0f, (float) getHeight() - 16.0f, 34.0f, 11.0f);
+        g.setColour (lit ? Theme::play : Theme::lcdDim.withAlpha (0.5f));
+        g.setFont (Theme::font (9.5f, true));
+        g.drawText ("MIDI", led, juce::Justification::centredRight);
+        g.fillEllipse (led.getX() - 2.0f, led.getCentreY() - 3.0f, 6.0f, 6.0f);
     }
 
     void resized() override
@@ -241,6 +252,8 @@ private:
     Engine& engine;
     TempoLabel tempo;
     juce::Rectangle<int> tempoArea, sigArea;
+    int lastMidiActivity = 0;
+    juce::uint32 midiLitUntil = 0;
 };
 
 //==============================================================================
@@ -352,7 +365,7 @@ public:
         metroB.setBounds (r.removeFromLeft (bw).withSizeKeepingCentre (bw - 2, 32));
         r.removeFromLeft (14);
 
-        const int lcdW = juce::jmin (r.getWidth(), 480);
+        const int lcdW = juce::jmin (r.getWidth(), 530);
         lcd.setBounds (r.removeFromLeft (lcdW).withSizeKeepingCentre (lcdW, 46));
     }
 

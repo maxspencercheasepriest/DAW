@@ -19,6 +19,7 @@ enum CommandIDs
 
     cmdNewTrack = 200,
     cmdDeleteTrack,
+    cmdNewInstrumentTrack,
 
     cmdPlayStop = 300,
     cmdRecord,
