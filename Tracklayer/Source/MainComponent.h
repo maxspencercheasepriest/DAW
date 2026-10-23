@@ -2,6 +2,7 @@
 
 #include "TransportBar.h"
 #include "MixerView.h"
+#include "PluginWindows.h"
 
 class MainComponent : public juce::Component,
                       public juce::MenuBarModel,
@@ -47,6 +48,10 @@ private:
     void exportMix();
     void showSettings();
     void saveDeviceState();
+    void showPluginManager();
+    void loadPluginInto (const TrackPtr&, int slot, const juce::PluginDescription&);
+    void disposeLater (std::unique_ptr<juce::AudioPluginInstance>);
+    void keepAliveBriefly (std::vector<TrackPtr>);
 
     juce::ApplicationProperties& properties;
     Theme::LookAndFeel lookAndFeel;
@@ -64,6 +69,10 @@ private:
     juce::String lastTitle;
     int meterDivider = 0;
     bool rebuildPending = false;
+
+    // declared last so they're destroyed before the plugins they show
+    PluginWindowManager pluginWindows { ctx };
+    std::unique_ptr<PluginManagerWindow> pluginManager;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

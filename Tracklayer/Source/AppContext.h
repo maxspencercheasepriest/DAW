@@ -11,6 +11,7 @@ enum CommandIDs
     cmdImportAudio,
     cmdExportMix,
     cmdSettings,
+    cmdPluginManager,
     cmdQuit,
 
     cmdDeleteClip = 100,
@@ -61,6 +62,11 @@ struct AppContext
     std::function<void()> selectionChanged;
     std::function<void (int)> runCommand;
     std::function<void (const juce::String&, const juce::String&)> showMessage;
+
+    // plugin slots
+    std::function<void (const TrackPtr&, int slot, const juce::PluginDescription&)> loadPlugin;
+    std::function<void (const TrackPtr&, int slot)> removePlugin;
+    std::function<void (const TrackPtr&, int slot)> openPlugin;
 
     double snap (double seconds, bool bypass) const
     {

@@ -24,6 +24,21 @@ MainComponent::MainComponent (ApplicationProperties& props) : properties (props)
     ctx.runCommand       = [this] (int c) { runCommand (c); };
     ctx.showMessage      = [this] (const String& t, const String& m) { showMessage (t, m); };
 
+    ctx.loadPlugin   = [this] (const TrackPtr& t, int s, const PluginDescription& d) { loadPluginInto (t, s, d); };
+    ctx.openPlugin   = [this] (const TrackPtr& t, int s) { pluginWindows.open (t, s); };
+    ctx.removePlugin = [this] (const TrackPtr& t, int s)
+    {
+        pluginWindows.closeFor (t->inserts[(size_t) s].get());
+        disposeLater (engine.setInsert (*t, s, nullptr));
+        syncControls();
+        updateTitle();
+    };
+
+    // Remember which plugins were found by previous scans.
+    if (auto xml = properties.getUserSettings()->getXmlValue ("knownPlugins"))
+        engine.knownPlugins.recreateFromXml (*xml);
+    engine.knownPlugins.addChangeListener (this);
+
     engine.onRecordingFinished = [this]
     {
         transport.sync();
@@ -68,6 +83,9 @@ MainComponent::~MainComponent()
     stopTimer();
     saveDeviceState();
     engine.deviceManager.removeChangeListener (this);
+    engine.knownPlugins.removeChangeListener (this);
+    pluginManager.reset();
+    pluginWindows.closeAll();
    #if JUCE_MAC
     MenuBarModel::setMacMainMenu (nullptr);
    #endif
@@ -91,7 +109,7 @@ void MainComponent::resized()
 
     mixer.setVisible (mixerVisible);
     if (mixerVisible)
-        mixer.setBounds (r.removeFromBottom (jmin (340, r.getHeight() / 2)));
+        mixer.setBounds (r.removeFromBottom (jmin (500, r.getHeight() * 3 / 5)));
 
     arrange.setBounds (r);
 }
@@ -130,8 +148,16 @@ void MainComponent::timerCallback()
         grabKeyboardFocus();
 }
 
-void MainComponent::changeListenerCallback (ChangeBroadcaster*)
+void MainComponent::changeListenerCallback (ChangeBroadcaster* source)
 {
+    if (source == &engine.knownPlugins)
+    {
+        if (auto xml = engine.knownPlugins.createXml())
+            properties.getUserSettings()->setValue ("knownPlugins", xml.get());
+        properties.saveIfNeeded();
+        return;
+    }
+
     arrange.refreshInputs();
     mixer.refreshInputs();
     saveDeviceState();
@@ -217,6 +243,8 @@ void MainComponent::runCommand (int cmd)
         case cmdNewProject:
             confirmDiscard ([this]
             {
+                pluginWindows.closeAll();
+                keepAliveBriefly (engine.tracks);
                 engine.newProject();
                 if (auto* dev = engine.deviceManager.getCurrentAudioDevice())
                 {
@@ -238,6 +266,7 @@ void MainComponent::runCommand (int cmd)
         case cmdImportAudio:  importAudio(); break;
         case cmdExportMix:    exportMix(); break;
         case cmdSettings:     showSettings(); break;
+        case cmdPluginManager: showPluginManager(); break;
         case cmdQuit:         requestQuit(); break;
 
         case cmdDeleteClip:
@@ -275,6 +304,8 @@ void MainComponent::runCommand (int cmd)
         case cmdDeleteTrack:
             if (v.selectedTrack != nullptr && ! e.isRecording())
             {
+                pluginWindows.closeForTrack (*v.selectedTrack);
+                keepAliveBriefly ({ v.selectedTrack });
                 e.removeTrack (v.selectedTrack);
                 v.selectedTrack = nullptr;
                 v.selectedClip = nullptr;
@@ -427,6 +458,7 @@ PopupMenu MainComponent::getMenuForIndex (int index, const String&)
             addItem (m, cmdExportMix, "Bounce Mix to WAV...", "Ctrl+B", ! rec);
             m.addSeparator();
             addItem (m, cmdSettings, "Audio Settings...", "Ctrl+,");
+            addItem (m, cmdPluginManager, "Plugin Manager...", "");
             m.addSeparator();
             addItem (m, cmdQuit, "Quit", "Alt+F4");
             break;
@@ -478,11 +510,15 @@ PopupMenu MainComponent::getMenuForIndex (int index, const String&)
                              "Ctrl+I  Import audio,  Ctrl+B  Bounce mix\n\n"
                              "Hold Alt while dragging to turn off snapping.\n"
                              "Drag in the top strip of the ruler to set a cycle area.\n"
-                             "Drag audio files from Explorer onto the tracks.");
+                             "Drag audio files from Explorer onto the tracks.\n\n"
+                             "Plugins: open the Mixer (X), click an empty Audio FX slot\n"
+                             "to add an effect, click it again to open it, right-click\n"
+                             "to bypass or remove it. Scan for plugins in\n"
+                             "File > Plugin Manager.");
             });
             m.addItem ("About Tracklayer", [this]
             {
-                showMessage ("About Tracklayer", "Tracklayer 0.1\nA small multitrack recorder built with JUCE.");
+                showMessage ("About Tracklayer", "Tracklayer 0.2\nA small multitrack recorder built with JUCE.\n\nVST is a trademark of Steinberg Media Technologies GmbH.");
             });
             break;
 
@@ -565,6 +601,8 @@ void MainComponent::openProject()
 
 void MainComponent::loadProjectFile (const File& f)
 {
+    pluginWindows.closeAll();
+    keepAliveBriefly (engine.tracks);
     String err;
     const bool ok = engine.loadProject (f, err);
     ctx.view.selectedClip = nullptr;
@@ -650,4 +688,63 @@ void MainComponent::showSettings()
     o.resizable = false;
     o.componentToCentreAround = this;
     o.launchAsync();
+}
+
+//==============================================================================
+// Plugins
+//==============================================================================
+void MainComponent::showPluginManager()
+{
+    if (pluginManager == nullptr)
+    {
+        SafePointer<MainComponent> safe (this);
+        pluginManager = std::make_unique<PluginManagerWindow> (engine, properties.getUserSettings(), [safe]
+        {
+            MessageManager::callAsync ([safe] { if (safe != nullptr) safe->pluginManager.reset(); });
+        });
+    }
+    pluginManager->toFront (true);
+}
+
+void MainComponent::loadPluginInto (const TrackPtr& track, int slot, const PluginDescription& desc)
+{
+    SafePointer<MainComponent> safe (this);
+    std::weak_ptr<Track> weakTrack = track;
+
+    engine.pluginFormats.createPluginInstanceAsync (desc, engine.getSampleRate(), Engine::pluginMaxBlock,
+        [safe, weakTrack, slot, desc] (std::unique_ptr<AudioPluginInstance> plugin, const String& error)
+        {
+            auto t = weakTrack.lock();
+            if (safe == nullptr || t == nullptr)
+                return;
+
+            auto& self = *safe;
+            if (plugin == nullptr)
+            {
+                self.showMessage ("Plugin", "Couldn't load " + desc.name + (error.isNotEmpty() ? ":\n" + error : String()));
+                return;
+            }
+
+            self.pluginWindows.closeFor (t->inserts[(size_t) slot].get());
+            self.disposeLater (self.engine.setInsert (*t, slot, std::move (plugin), desc));
+            self.syncControls();
+            self.updateTitle();
+            self.pluginWindows.open (t, slot);
+        });
+}
+
+void MainComponent::disposeLater (std::unique_ptr<AudioPluginInstance> plugin)
+{
+    if (plugin == nullptr)
+        return;
+
+    // Let the plugin's just-closed editor finish tearing down first.
+    auto shared = std::shared_ptr<AudioPluginInstance> (std::move (plugin));
+    Timer::callAfterDelay (300, [shared] {});
+}
+
+void MainComponent::keepAliveBriefly (std::vector<TrackPtr> oldTracks)
+{
+    // Tracks own their plugins; hold them a moment so editors finish closing first.
+    Timer::callAfterDelay (300, [oldTracks] {});
 }

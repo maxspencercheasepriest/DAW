@@ -40,6 +40,16 @@ public:
         {
             auto cwd = juce::File::getCurrentWorkingDirectory();
             Engine engine;
+            {
+                juce::PropertiesFile::Options o;
+                o.applicationName = "Tracklayer";
+                o.filenameSuffix = ".settings";
+                o.folderName = "Tracklayer";
+                o.osxLibrarySubFolder = "Application Support";
+                juce::PropertiesFile settings (o);
+                if (auto xml = settings.getXmlValue ("knownPlugins"))
+                    engine.knownPlugins.recreateFromXml (*xml);
+            }
             juce::String err;
             const bool ok = engine.loadProject (cwd.getChildFile (args[1].unquoted()), err)
                          && engine.exportMix (cwd.getChildFile (args[2].unquoted()), err);

@@ -34,6 +34,9 @@ set(ASIO_SDK_DIR "" CACHE PATH "Path to the Steinberg ASIO SDK (optional)")
 juce_add_gui_app(Tracklayer
     PRODUCT_NAME "Tracklayer"
     COMPANY_NAME "Tracklayer"
+    BUNDLE_ID "com.tracklayer.app"
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "Tracklayer needs microphone access to record audio."
     VERSION ${PROJECT_VERSION})
 
 target_sources(Tracklayer PRIVATE
@@ -48,6 +51,8 @@ target_compile_definitions(Tracklayer PRIVATE
     JUCE_USE_FLAC=1
     JUCE_USE_OGGVORBIS=1
     JUCE_DISPLAY_SPLASH_SCREEN=0
+    JUCE_PLUGINHOST_VST3=1
+    JUCE_PLUGINHOST_AU=1
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:Tracklayer,JUCE_PRODUCT_NAME>"
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:Tracklayer,JUCE_VERSION>")
 
@@ -60,6 +65,7 @@ endif()
 target_link_libraries(Tracklayer
     PRIVATE
         juce::juce_audio_utils
+        juce::juce_audio_processors
         juce::juce_audio_formats
         juce::juce_audio_devices
         juce::juce_gui_extra

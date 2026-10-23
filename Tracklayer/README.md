@@ -1,10 +1,10 @@
 # Tracklayer
 
-A small Logic-style multitrack recorder for Windows, written in C++ with [JUCE](https://juce.com).
+A small Logic-style multitrack recorder for Windows and Mac, written in C++ with [JUCE](https://juce.com).
 
 ![Tracklayer](docs/screenshot.png)
 
-## What it does (v0.1)
+## What it does (v0.2)
 
 - **Arrange window**: tracks with coloured regions and waveforms, bar ruler, beat grid, snapping, zoom.
 - **Recording**: arm any number of tracks (R), pick a mono or stereo input per track, and press R to record. The app compensates for latency automatically, and recordings are saved as 24-bit WAVs in the project's `Audio` folder.
@@ -13,6 +13,7 @@ A small Logic-style multitrack recorder for Windows, written in C++ with [JUCE](
 - **Cycle mode**: drag in the yellow strip at the top of the ruler and click it to toggle, like Logic.
 - **Metronome**, tempo (drag or double-click the LCD), and a bars/beats/div/tick display.
 - **Mixer** (X): faders, pan, mute/solo, peak meters, Stereo Out.
+- **Plugins**: VST3 on Windows and Mac, plus Audio Units on Mac. Each track has six Audio FX insert slots on its mixer strip: click an empty slot to add an effect, click it again to open its window, right-click to bypass, replace or remove it. Plugin settings are saved in the project. Find your plugins with **File → Plugin Manager → Scan / Options → Scan for new or updated VST3 plug-ins**.
 - **Import** WAV, AIFF, FLAC, Ogg and MP3 files by drag-and-drop from Explorer or with Ctrl+I.
 - **Bounce** the mix to a 24-bit WAV with Ctrl+B.
 - **Save and open** `.tlproj` projects, which are plain JSON and point at the audio files.
@@ -22,10 +23,19 @@ A small Logic-style multitrack recorder for Windows, written in C++ with [JUCE](
 ### Option A: let GitHub build it (no software to install)
 
 1. Create a new GitHub repository and upload this folder to it.
-2. Open the **Actions** tab. The "Build Windows" workflow runs automatically, or you can start it with **Run workflow**.
-3. When it finishes (about 10 minutes), download **Tracklayer-Windows** from the run's Artifacts and unzip `Tracklayer.exe`.
+2. Open the **Actions** tab. The "Build" workflow runs automatically, or you can start it with **Run workflow**.
+3. When it finishes (about 10–15 minutes), download **Tracklayer-Windows** or **Tracklayer-Mac** from the run's Artifacts.
 
-### Option B: build it on your PC
+The Mac app isn't signed, so the first time, right-click it and choose **Open**, then **Open** again.
+
+### Option B: build it on a Mac
+
+1. Install the Apple build tools in Terminal: `xcode-select --install`
+2. Install [Homebrew](https://brew.sh), then run `brew install cmake`
+3. In Terminal, `cd` to this folder and run `bash build-mac.sh`
+4. `Tracklayer.app` appears in this folder. Drag it to Applications if you like.
+
+### Option C: build it on a Windows PC
 
 1. Install [Visual Studio 2022 Community](https://visualstudio.microsoft.com/vs/community/) with the **Desktop development with C++** workload.
 2. Open the **Developer Command Prompt for VS 2022**, `cd` to this folder, and run `build-windows.bat`.
@@ -73,9 +83,9 @@ Tracklayer.exe --bounce "My Song.tlproj" "Mix.wav"     render without opening th
 ## Roadmap
 
 1. Undo/redo
-2. MIDI tracks: piano roll, MIDI input, a built-in synth
-3. VST3 plugin hosting (inserts on every channel)
-4. Sends, buses and automation
+2. Built-in amp slot for TONE3000 / NAM captures and cab IRs
+3. MIDI tracks: piano roll, MIDI input, instrument plugins
+4. Plugin latency compensation, sends, buses and automation
 5. Importing Logic projects: stems and MIDI first, then AAF, then reading `.logicx` directly
 
 ## Licence note

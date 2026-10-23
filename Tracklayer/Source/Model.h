@@ -22,6 +22,9 @@ struct Clip
 
 using ClipPtr = std::shared_ptr<Clip>;
 
+// Number of plugin insert slots on every track (like Logic's Audio FX slots).
+static constexpr int numInserts = 6;
+
 // Audio thread reads these fields; the message thread is the only writer.
 // Structural changes (adding/removing tracks or clips, moving clips) are made
 // while holding Engine::lock. Simple flags are atomics.
@@ -37,6 +40,11 @@ struct Track
     std::atomic<int>   inputChannel { 0 };   // index into the device's active inputs
 
     std::vector<ClipPtr> clips;
+
+    // Effect plugins, processed top to bottom. Changed only under Engine::lock.
+    std::array<std::unique_ptr<juce::AudioPluginInstance>, numInserts> inserts;
+    std::array<std::atomic<bool>, numInserts> bypassed {};
+    std::array<juce::PluginDescription, numInserts> insertInfo;   // what each slot was loaded from
 
     // metering: audio thread writes peaks, UI turns them into decaying display values
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f };

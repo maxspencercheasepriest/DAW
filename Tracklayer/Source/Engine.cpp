@@ -12,6 +12,9 @@ static void storeMax (std::atomic<float>& a, float v)
 Engine::Engine()
 {
     formatManager.registerBasicFormats();
+    pluginFormats.addDefaultFormats();
+    pluginBuffer.setSize (32, pluginMaxBlock);
+    pluginMidi.ensureSize (256);
     writerThread.startThread();
 
     mixBuffer.setSize (2, maxBlock);
@@ -472,6 +475,26 @@ bool Engine::saveProject (const File& file, String& error)
             clipList.add (var (co.release()));
         }
         to->setProperty ("clips", clipList);
+
+
+        Array<var> pluginList;
+        for (size_t s = 0; s < (size_t) numInserts; ++s)
+        {
+            auto* plug = t->inserts[s].get();
+            if (plug == nullptr)
+                continue;
+
+            MemoryBlock state;
+            plug->getStateInformation (state);
+            auto po = std::make_unique<DynamicObject>();
+            po->setProperty ("slot", (int) s);
+            po->setProperty ("bypassed", t->bypassed[s].load());
+            auto desc = t->insertInfo[s].fileOrIdentifier.isNotEmpty() ? t->insertInfo[s] : plug->getPluginDescription();
+            po->setProperty ("description", desc.createXml()->toString (XmlElement::TextFormat().singleLine()));
+            po->setProperty ("state", state.toBase64Encoding());
+            pluginList.add (var (po.release()));
+        }
+        to->setProperty ("plugins", pluginList);
         trackList.add (var (to.release()));
     }
     root->setProperty ("tracks", trackList);
@@ -537,6 +560,35 @@ bool Engine::loadProject (const File& file, String& error)
                     t->clips.push_back (c);
                 }
             }
+            if (auto* plugins = tv["plugins"].getArray())
+            {
+                for (auto& pv : *plugins)
+                {
+                    const int slot = (int) pv["slot"];
+                    PluginDescription desc;
+                    auto xml = parseXML (pv["description"].toString());
+                    if (slot < 0 || slot >= numInserts || xml == nullptr || ! desc.loadFromXml (*xml))
+                        continue;
+
+                    String err;
+                    auto plug = createPlugin (desc, err);
+                    if (plug == nullptr)
+                    {
+                        missing.addIfNotAlreadyThere ("Plugin: " + desc.name);
+                        continue;
+                    }
+
+                    MemoryBlock state;
+                    if (state.fromBase64Encoding (pv["state"].toString()) && state.getSize() > 0)
+                        plug->setStateInformation (state.getData(), (int) state.getSize());
+
+                    preparePlugin (*plug);
+                    t->inserts[(size_t) slot] = std::move (plug);
+                    t->insertInfo[(size_t) slot] = desc;
+                    t->bypassed[(size_t) slot] = (bool) pv.getProperty ("bypassed", false);
+                }
+            }
+
             loaded.push_back (t);
         }
     }
@@ -559,7 +611,7 @@ bool Engine::loadProject (const File& file, String& error)
     dirty = false;
 
     if (missing.size() > 0)
-        error = "These audio files couldn't be found and were skipped:\n" + missing.joinIntoString ("\n");
+        error = "These files or plugins couldn't be found and were skipped:\n" + missing.joinIntoString ("\n");
     return true;
 }
 
@@ -592,13 +644,29 @@ bool Engine::exportMix (const File& file, String& error)
     }
     os.release();
 
-    const int block = 4096;
+    const int block = maxBlock;
     AudioBuffer<float> buf (2, block);
-    const auto total = (int64) std::ceil ((end + 0.05) * sr);
     const float mv = masterVolume.load();
+
+    // Let effect tails (reverb, delay) ring out for up to 3 seconds.
+    bool anyPlugins = false;
+    for (auto& t : tracks)
+        for (auto& p : t->inserts)
+            anyPlugins = anyPlugins || p != nullptr;
+    const auto total = (int64) std::ceil ((end + (anyPlugins ? 3.0 : 0.05)) * sr);
 
     // Holding the lock pauses the live audio callback (it outputs silence).
     const ScopedLock sl (lock);
+
+    auto forEachPlugin = [this] (auto fn)
+    {
+        for (auto& t : tracks)
+            for (auto& p : t->inserts)
+                if (p != nullptr)
+                    fn (*p);
+    };
+    forEachPlugin ([] (AudioPluginInstance& p) { p.setNonRealtime (true); p.reset(); });
+
     for (int64 pos = 0; pos < total; pos += block)
     {
         const int n = (int) jmin ((int64) block, total - pos);
@@ -607,6 +675,8 @@ bool Engine::exportMix (const File& file, String& error)
         buf.applyGain (0, n, mv);
         writer->writeFromAudioSampleBuffer (buf, 0, n);
     }
+
+    forEachPlugin ([] (AudioPluginInstance& p) { p.setNonRealtime (false); p.reset(); });
     return true;
 }
 
@@ -626,9 +696,100 @@ void Engine::audioDeviceAboutToStart (AudioIODevice* device)
     trackBuffer.setSize (2, jmax (8192, bs));
     silence.setSize (2, jmax (8192, bs));
     silence.clear();
+    currentBlockSize = jmin (maxBlock, jmax (16, device->getCurrentBufferSizeSamples()));
+
+    for (auto& t : tracks)
+        for (auto& p : t->inserts)
+            if (p != nullptr)
+                preparePlugin (*p);
 }
 
 void Engine::audioDeviceStopped() {}
+
+//==============================================================================
+// Plugins
+//==============================================================================
+Array<PluginDescription> Engine::getEffectPlugins() const
+{
+    Array<PluginDescription> result;
+    for (auto& d : knownPlugins.getTypes())
+        if (! d.isInstrument)
+            result.add (d);
+    return result;
+}
+
+void Engine::preparePlugin (AudioPluginInstance& p)
+{
+    // Ask for stereo in/out; fall back to mono-in/stereo-out, then mono.
+    using CS = AudioChannelSet;
+    const std::pair<CS, CS> layouts[] = { { CS::stereo(), CS::stereo() },
+                                          { CS::mono(),   CS::stereo() },
+                                          { CS::mono(),   CS::mono() } };
+    for (auto& [in, out] : layouts)
+    {
+        AudioProcessor::BusesLayout l = p.getBusesLayout();
+        if (l.inputBuses.isEmpty() || l.outputBuses.isEmpty())
+            break;
+        l.inputBuses.getReference (0) = in;
+        l.outputBuses.getReference (0) = out;
+        if (p.checkBusesLayoutSupported (l) && p.setBusesLayout (l))
+            break;
+    }
+
+    p.setRateAndBufferSizeDetails (sampleRate.load(), pluginMaxBlock);
+    p.prepareToPlay (sampleRate.load(), pluginMaxBlock);
+}
+
+std::unique_ptr<AudioPluginInstance> Engine::createPlugin (PluginDescription& d, String& error)
+{
+    auto p = pluginFormats.createPluginInstance (d, sampleRate.load(), pluginMaxBlock, error);
+
+    // Not where it was (e.g. the project came from another computer)?
+    // Look for the same plugin among the ones scanned on this machine.
+    if (p == nullptr)
+    {
+        for (auto& k : knownPlugins.getTypes())
+        {
+            if (k.name == d.name && k.manufacturerName == d.manufacturerName && k.pluginFormatName == d.pluginFormatName)
+            {
+                String err2;
+                p = pluginFormats.createPluginInstance (k, sampleRate.load(), pluginMaxBlock, err2);
+                if (p != nullptr)
+                {
+                    error.clear();
+                    d = k;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (p == nullptr && error.isEmpty())
+        error = "Couldn't load " + d.name;
+    return p;
+}
+
+std::unique_ptr<AudioPluginInstance> Engine::setInsert (Track& t, int slot, std::unique_ptr<AudioPluginInstance> p,
+                                                      const PluginDescription& desc)
+{
+    if (slot < 0 || slot >= numInserts)
+        return p;
+
+    if (p != nullptr)
+        preparePlugin (*p);
+
+    {
+        const ScopedLock sl (lock);
+        std::swap (t.inserts[(size_t) slot], p);
+        t.bypassed[(size_t) slot] = false;
+        t.insertInfo[(size_t) slot] = desc;
+    }
+
+    if (p != nullptr)
+        p->releaseResources();
+    dirty = true;
+    return p;   // the old plugin
+}
 
 void Engine::audioDeviceIOCallbackWithContext (const float* const* in, int numIn,
                                                float* const* out, int numOut,
@@ -787,6 +948,50 @@ void Engine::renderSegment (AudioBuffer<float>& out, int outOffset, int num, int
             {
                 if (inL != nullptr) FloatVectorOperations::add (trackBuffer.getWritePointer (0), inL, num);
                 if (inR != nullptr) FloatVectorOperations::add (trackBuffer.getWritePointer (1), inR, num);
+            }
+        }
+
+        // ---- insert effects ----
+        for (size_t s = 0; s < (size_t) numInserts; ++s)
+        {
+            auto* plug = t.inserts[s].get();
+            if (plug == nullptr || t.bypassed[s].load())
+                continue;
+
+            const int ins  = plug->getTotalNumInputChannels();
+            const int outs = plug->getTotalNumOutputChannels();
+            const int chans = jlimit (1, pluginBuffer.getNumChannels(), jmax (ins, outs, 2));
+
+            for (int done = 0; done < num; done += pluginMaxBlock)
+            {
+                const int n = jmin (pluginMaxBlock, num - done);
+                AudioBuffer<float> view (pluginBuffer.getArrayOfWritePointers(), chans, n);
+                view.clear();
+
+                if (ins == 1)
+                {
+                    view.addFrom (0, 0, trackBuffer, 0, done, n, 0.5f);
+                    view.addFrom (0, 0, trackBuffer, 1, done, n, 0.5f);
+                }
+                else if (ins >= 2)
+                {
+                    view.copyFrom (0, 0, trackBuffer, 0, done, n);
+                    view.copyFrom (1, 0, trackBuffer, 1, done, n);
+                }
+
+                pluginMidi.clear();
+                plug->processBlock (view, pluginMidi);
+
+                if (outs >= 2)
+                {
+                    trackBuffer.copyFrom (0, done, view, 0, 0, n);
+                    trackBuffer.copyFrom (1, done, view, 1, 0, n);
+                }
+                else if (outs == 1)
+                {
+                    trackBuffer.copyFrom (0, done, view, 0, 0, n);
+                    trackBuffer.copyFrom (1, done, view, 0, 0, n);
+                }
             }
         }
 

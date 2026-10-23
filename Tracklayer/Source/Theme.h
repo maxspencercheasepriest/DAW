@@ -122,6 +122,12 @@ namespace Theme
             setColour (juce::TooltipWindow::backgroundColourId, panel);
             setColour (juce::BubbleComponent::backgroundColourId, panel);
             setColour (juce::BubbleComponent::outlineColourId, juce::Colour (0xff55555d));
+            setColour (juce::TableHeaderComponent::backgroundColourId, panelLight);
+            setColour (juce::TableHeaderComponent::textColourId, text);
+            setColour (juce::TableHeaderComponent::outlineColourId, juce::Colour (0xff45454b));
+            setColour (juce::TableHeaderComponent::highlightColourId, accent.withAlpha (0.3f));
+            setColour (juce::ListBox::backgroundColourId, panelDark);
+            setColour (juce::ListBox::textColourId, text);
         }
 
         void drawButtonBackground (juce::Graphics& g, juce::Button& b, const juce::Colour& backgroundColour,

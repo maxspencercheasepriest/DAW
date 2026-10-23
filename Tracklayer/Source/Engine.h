@@ -12,6 +12,20 @@ public:
     juce::AudioDeviceManager deviceManager;
     juce::AudioFormatManager formatManager;
 
+    // ---- plugins ------------------------------------------------------
+    juce::AudioPluginFormatManager pluginFormats;
+    juce::KnownPluginList knownPlugins;
+    juce::Array<juce::PluginDescription> getEffectPlugins() const;
+
+    /** Puts a plugin in a slot (nullptr empties it). Returns the plugin it replaced,
+        which the caller must delete after closing its editor window. */
+    std::unique_ptr<juce::AudioPluginInstance> setInsert (Track&, int slot, std::unique_ptr<juce::AudioPluginInstance>,
+                                                         const juce::PluginDescription& = {});
+    /** Creates a plugin. If found via the scanned list instead, `d` is updated to that entry. */
+    std::unique_ptr<juce::AudioPluginInstance> createPlugin (juce::PluginDescription& d, juce::String& error);
+    void preparePlugin (juce::AudioPluginInstance&);
+    static constexpr int pluginMaxBlock = 4096;
+
     // ---- project data -------------------------------------------------
     // The message thread may read tracks/clips freely; it must hold `lock`
     // while changing them. The audio thread only reads, under a try-lock.
@@ -92,7 +106,9 @@ private:
     std::atomic<bool> playing { false }, recording { false };
 
     juce::TimeSliceThread writerThread { "Tracklayer recorder" };
-    juce::AudioBuffer<float> mixBuffer, trackBuffer, silence;
+    juce::AudioBuffer<float> mixBuffer, trackBuffer, silence, pluginBuffer;
+    juce::MidiBuffer pluginMidi;
+    int currentBlockSize = 512;
     int recordLatencySamples = 0;
 
     int clickRemaining = 0, clickTotal = 1;
