@@ -19,15 +19,3 @@ jobs:
         with:
           name: Tracklayer-Windows
           path: Tracklayer/build/Tracklayer_artefacts/Release/Tracklayer.exe
-
-  mac:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: cmake -B build -G Xcode -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
-      - run: cmake --build build --config Release -- -quiet
-      - run: cd build/Tracklayer_artefacts/Release && ditto -c -k --keepParent Tracklayer.app Tracklayer-mac.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Tracklayer-Mac
-          path: Tracklayer/build/Tracklayer_artefacts/Release/Tracklayer-mac.zip
