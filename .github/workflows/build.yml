@@ -17,7 +17,7 @@ jobs:
           path: build/Tracklayer_artefacts/Release/Tracklayer.exe
 
   mac:
-    runs-on: macos-26
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - run: cmake -B build -G Xcode -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
@@ -28,6 +28,8 @@ jobs:
           codesign --force --deep --sign - Tracklayer.app
           codesign --verify --verbose Tracklayer.app
           lipo -info Tracklayer.app/Contents/MacOS/Tracklayer
+          lipo -verify_arch x86_64 arm64 Tracklayer.app/Contents/MacOS/Tracklayer   # must run on Intel and Apple Silicon
+          /usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" Tracklayer.app/Contents/Info.plist || true
           ditto -c -k --keepParent Tracklayer.app Tracklayer-mac.zip
       - uses: actions/upload-artifact@v4
         with:
