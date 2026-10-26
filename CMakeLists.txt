@@ -43,7 +43,8 @@ target_sources(Tracklayer PRIVATE
     Source/Main.cpp
     Source/Engine.cpp
     Source/MainComponent.cpp
-    Source/BuiltIn.cpp)
+    Source/BuiltIn.cpp
+    Source/Drummer.cpp)
 
 # Piano samples for Tracklayer Keys, compiled into the app
 # (Salamander Grand Piano by Alexander Holm, CC-BY 3.0)

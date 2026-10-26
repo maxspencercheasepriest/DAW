@@ -116,6 +116,7 @@ private:
                 case 2:
                     self.track->bypassed[(size_t) self.slot] = ! self.track->bypassed[(size_t) self.slot].load();
                     self.ctx.engine.dirty = true;
+                    self.ctx.commitEdit ("Bypass Plugin");
                     self.repaint();
                     return;
                 case 3: self.ctx.removePlugin (self.track, self.slot); return;

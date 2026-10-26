@@ -20,7 +20,14 @@ MainComponent::MainComponent (ApplicationProperties& props) : properties (props)
         });
     };
     ctx.mixChanged       = [this] { syncControls(); };
-    ctx.selectionChanged = [this] { arrange.selectionChanged(); mixer.repaint(); };
+    ctx.selectionChanged = [this]
+    {
+        arrange.selectionChanged();
+        mixer.repaint();
+        // the Drummer window follows the selected drummer region
+        if (drummerWindow != nullptr && ctx.view.selectedClip != nullptr && ctx.view.selectedClip->drummer != nullptr)
+            drummerWindow->setClip (ctx.view.selectedClip);
+    };
     ctx.runCommand       = [this] (int c) { runCommand (c); };
     ctx.showMessage      = [this] (const String& t, const String& m) { showMessage (t, m); };
 
@@ -31,8 +38,10 @@ MainComponent::MainComponent (ApplicationProperties& props) : properties (props)
         pluginWindows.closeFor (t->pluginAt (s));
         disposeLater (engine.setInsert (*t, s, nullptr));
         syncControls();
-        updateTitle();
+        commitEdit ("Remove Plugin");
     };
+    ctx.commit = [this] (const String& label) { commitEdit (label); };
+    ctx.openDrummer = [this] (const ClipPtr& c) { openDrummer (c); };
 
     // Remember which plugins were found by previous scans.
     if (auto xml = properties.getUserSettings()->getXmlValue ("knownPlugins"))
@@ -43,7 +52,7 @@ MainComponent::MainComponent (ApplicationProperties& props) : properties (props)
     {
         transport.sync();
         arrange.repaintTimeline();
-        updateTitle();
+        commitEdit ("Record");
     };
 
     // ---- audio device ----
@@ -62,6 +71,7 @@ MainComponent::MainComponent (ApplicationProperties& props) : properties (props)
             engine.tracks[i]->inputChannel = (int) i % numIn;
     }
     engine.dirty = false;
+    engine.resetHistory();
 
    #if JUCE_MAC
     MenuBarModel::setMacMainMenu (this);   // use the Mac's top menu bar
@@ -122,6 +132,13 @@ void MainComponent::resized()
 //==============================================================================
 void MainComponent::timerCallback()
 {
+    // MIDI and drummer regions move when the tempo changes
+    if (! approximatelyEqual (engine.tempo.load(), lastTempo))
+    {
+        lastTempo = engine.tempo.load();
+        arrange.repaintTimeline();
+    }
+
     auto decay = [] (std::atomic<float>& peak, float& disp)
     {
         const float p = peak.exchange (0.0f);
@@ -261,6 +278,7 @@ void MainComponent::runCommand (int cmd)
             {
                 pluginWindows.closeAll();
                 keepAliveBriefly (engine.tracks);
+                if (drummerWindow != nullptr) drummerWindow->setClip (nullptr);
                 engine.newProject();
                 if (auto* dev = engine.deviceManager.getCurrentAudioDevice())
                 {
@@ -269,6 +287,7 @@ void MainComponent::runCommand (int cmd)
                         engine.tracks[i]->inputChannel = (int) i % numIn;
                 }
                 engine.dirty = false;
+                engine.resetHistory();
                 ctx.view.selectedClip = nullptr;
                 ctx.view.selectedTrack = nullptr;
                 ctx.view.scrollX = 0.0;
@@ -285,11 +304,17 @@ void MainComponent::runCommand (int cmd)
         case cmdPluginManager: showPluginManager(); break;
         case cmdQuit:         requestQuit(); break;
 
+        case cmdUndo:
+        case cmdRedo:
+            undoRedo (cmd == cmdUndo);
+            break;
+
         case cmdDeleteClip:
             if (v.selectedClip != nullptr && ! e.isRecording())
             {
                 e.deleteClip (v.selectedClip);
                 v.selectedClip = nullptr;
+                commitEdit ("Delete Region");
             }
             break;
 
@@ -306,6 +331,7 @@ void MainComponent::runCommand (int cmd)
                 for (auto& c : clips)
                     e.splitClip (c, at);
             }
+            commitEdit ("Split");
             break;
         }
 
@@ -314,6 +340,19 @@ void MainComponent::runCommand (int cmd)
             auto t = e.addTrack();
             v.selectedTrack = t;
             rebuildTracks();
+            commitEdit ("New Track");
+            break;
+        }
+
+        case cmdNewDrummerTrack:
+        {
+            auto t = e.addDrummerTrack();
+            v.selectedTrack = t;
+            v.selectedClip = t->clips.empty() ? nullptr : t->clips.front();
+            rebuildTracks();
+            commitEdit ("New Drummer Track");
+            chooseInstrumentFor (t, true);
+            if (v.selectedClip != nullptr) openDrummer (v.selectedClip);
             break;
         }
 
@@ -323,30 +362,8 @@ void MainComponent::runCommand (int cmd)
             v.selectedTrack = t;
             rebuildTracks();
 
-            // Go straight to choosing a synth, like Logic does.
-            auto instruments = e.getInstrumentPlugins();
-            if (instruments.isEmpty())
-            {
-                showMessage ("Instrument track",
-                             "No instrument plugins have been found yet.\n\n"
-                             "Open File > Plugin Manager and scan for VST3 plugins, then click the "
-                             "track's \"Choose instrument...\" box.");
-            }
-            else
-            {
-                PopupMenu m;
-                KnownPluginList::addToMenu (m, instruments, KnownPluginList::sortByManufacturer);
-                SafePointer<MainComponent> safe (this);
-                m.showMenuAsync (PopupMenu::Options().withTargetComponent (&arrange)
-                                     .withMousePosition(),
-                                 [safe, t, instruments] (int result)
-                {
-                    if (safe == nullptr || result == 0) return;
-                    const int idx = KnownPluginList::getIndexChosenByMenu (instruments, result);
-                    if (idx >= 0)
-                        safe->loadPluginInto (t, -1, instruments.getReference (idx));
-                });
-            }
+            commitEdit ("New Instrument Track");
+            chooseInstrumentFor (t);
             break;
         }
 
@@ -359,6 +376,7 @@ void MainComponent::runCommand (int cmd)
                 v.selectedTrack = nullptr;
                 v.selectedClip = nullptr;
                 rebuildTracks();
+                commitEdit ("Delete Track");
             }
             break;
 
@@ -445,6 +463,10 @@ bool MainComponent::keyPressed (const KeyPress& k)
         { KeyPress (KeyPress::deleteKey, ctrl, 0),     cmdDeleteTrack },
         { KeyPress (KeyPress::backspaceKey, ctrl, 0),  cmdDeleteTrack },
         { KeyPress ('t', ctrl, 0),                     cmdSplitAtPlayhead },
+        { KeyPress ('z', ctrl, 0),                     cmdUndo },
+        { KeyPress ('z', ctrl | shift, 0),             cmdRedo },
+        { KeyPress ('y', ctrl, 0),                     cmdRedo },
+        { KeyPress ('u', ctrl | alt, 0),               cmdNewDrummerTrack },
         { KeyPress ('n', ctrl | alt, 0),               cmdNewTrack },
         { KeyPress ('s', ctrl | alt, 0),               cmdNewInstrumentTrack },
         { KeyPress ('n', ctrl, 0),                     cmdNewProject },
@@ -514,6 +536,9 @@ PopupMenu MainComponent::getMenuForIndex (int index, const String&)
             break;
 
         case 1:
+            addItem (m, cmdUndo, engine.canUndo() ? "Undo " + engine.undoLabel() : String ("Undo"), "Ctrl+Z", engine.canUndo() && ! rec);
+            addItem (m, cmdRedo, engine.canRedo() ? "Redo " + engine.redoLabel() : String ("Redo"), "Ctrl+Shift+Z", engine.canRedo() && ! rec);
+            m.addSeparator();
             addItem (m, cmdSplitAtPlayhead, "Split Region at Playhead", "Ctrl+T", ! rec);
             addItem (m, cmdDeleteClip, "Delete Region", "Delete", ctx.view.selectedClip != nullptr && ! rec);
             break;
@@ -521,6 +546,7 @@ PopupMenu MainComponent::getMenuForIndex (int index, const String&)
         case 2:
             addItem (m, cmdNewTrack, "New Audio Track", "Ctrl+Alt+N");
             addItem (m, cmdNewInstrumentTrack, "New Instrument Track", "Ctrl+Alt+S");
+            addItem (m, cmdNewDrummerTrack, "New Drummer Track", "Ctrl+Alt+U");
             addItem (m, cmdDeleteTrack, "Delete Track", "Ctrl+Delete", ctx.view.selectedTrack != nullptr && ! rec);
             break;
 
@@ -559,6 +585,8 @@ PopupMenu MainComponent::getMenuForIndex (int index, const String&)
                              "Delete  Delete region\n"
                              "Ctrl+Alt+N  New audio track\n"
                              "Ctrl+Alt+S  New instrument track\n"
+                             "Ctrl+Alt+U  New drummer track\n"
+                             "Ctrl+Z  Undo,  Ctrl+Shift+Z  Redo\n"
                              "Ctrl+I  Import audio,  Ctrl+B  Bounce mix\n\n"
                              "Hold Alt while dragging to turn off snapping.\n"
                              "Drag in the top strip of the ruler to set a cycle area.\n"
@@ -656,7 +684,9 @@ void MainComponent::loadProjectFile (const File& f)
     pluginWindows.closeAll();
     keepAliveBriefly (engine.tracks);
     String err;
+    if (drummerWindow != nullptr) drummerWindow->setClip (nullptr);
     const bool ok = engine.loadProject (f, err);
+    engine.resetHistory();
     ctx.view.selectedClip = nullptr;
     ctx.view.selectedTrack = nullptr;
     ctx.view.scrollX = 0.0;
@@ -699,6 +729,7 @@ void MainComponent::importAudio()
 
         ctx.view.selectedTrack = target;
         rebuildTracks();
+        commitEdit ("Import Audio");
         if (errors.size() > 0)
             showMessage ("Import", errors.joinIntoString ("\n"));
     });
@@ -780,19 +811,18 @@ void MainComponent::loadPluginInto (const TrackPtr& track, int slot, const Plugi
             self.pluginWindows.closeFor (t->pluginAt (slot));
             self.disposeLater (self.engine.setInsert (*t, slot, std::move (plugin), desc));
             self.syncControls();
-            self.updateTitle();
+            self.commitEdit (slot < 0 ? "Choose Instrument" : "Insert Plugin");
             self.pluginWindows.open (t, slot);
         });
 }
 
-void MainComponent::disposeLater (std::unique_ptr<AudioPluginInstance> plugin)
+void MainComponent::disposeLater (std::shared_ptr<AudioPluginInstance> plugin)
 {
     if (plugin == nullptr)
         return;
 
     // Let the plugin's just-closed editor finish tearing down first.
-    auto shared = std::shared_ptr<AudioPluginInstance> (std::move (plugin));
-    Timer::callAfterDelay (300, [shared] {});
+    Timer::callAfterDelay (300, [plugin] {});
 }
 
 void MainComponent::keepAliveBriefly (std::vector<TrackPtr> oldTracks)
@@ -800,3 +830,72 @@ void MainComponent::keepAliveBriefly (std::vector<TrackPtr> oldTracks)
     // Tracks own their plugins; hold them a moment so editors finish closing first.
     Timer::callAfterDelay (300, [oldTracks] {});
 }
+
+//==============================================================================
+void MainComponent::chooseInstrumentFor (const TrackPtr& t, bool drums)
+{
+    // Go straight to choosing a synth, like Logic does.
+    auto instruments = engine.getInstrumentPlugins();
+    if (instruments.isEmpty())
+    {
+        showMessage (drums ? "Drummer track" : "Instrument track",
+                     "No instrument plugins have been found yet.\n\n"
+                     "Open File > Plugin Manager and scan for VST3 plugins, then click the "
+                     "track's \"Choose instrument...\" box.");
+        return;
+    }
+
+    PopupMenu m;
+    if (drums)
+        m.addSectionHeader ("Choose a drum plugin (General MIDI drum map)");
+    KnownPluginList::addToMenu (m, instruments, KnownPluginList::sortByManufacturer);
+    SafePointer<MainComponent> safe (this);
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&arrange).withMousePosition(),
+                     [safe, t, instruments] (int result)
+    {
+        if (safe == nullptr || result == 0) return;
+        const int idx = KnownPluginList::getIndexChosenByMenu (instruments, result);
+        if (idx >= 0)
+            safe->loadPluginInto (t, -1, instruments.getReference (idx));
+    });
+}
+
+void MainComponent::commitEdit (const String& label)
+{
+    engine.commit (label);
+    updateTitle();
+}
+
+void MainComponent::undoRedo (bool isUndo)
+{
+    if (engine.isRecording())
+        return;
+
+    const bool ok = isUndo ? engine.undo() : engine.redo();
+    if (! ok)
+        return;
+
+    // Close the windows of any plugins that are no longer in the project.
+    pluginWindows.closeAllExcept (engine.livePlugins());
+
+    ctx.view.selectedClip = nullptr;
+    rebuildTracks();
+    syncControls();
+    if (drummerWindow != nullptr)
+        drummerWindow->setClip (nullptr);
+}
+
+void MainComponent::openDrummer (const ClipPtr& clip)
+{
+    if (drummerWindow == nullptr)
+    {
+        SafePointer<MainComponent> safe (this);
+        drummerWindow = std::make_unique<DrummerWindow> (ctx, [safe]
+        {
+            MessageManager::callAsync ([safe] { if (safe != nullptr) safe->drummerWindow.reset(); });
+        });
+    }
+    drummerWindow->setClip (clip);
+    drummerWindow->toFront (true);
+}
+

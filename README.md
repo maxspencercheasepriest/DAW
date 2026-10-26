@@ -4,17 +4,19 @@ A small Logic-style multitrack recorder for Windows and Mac, written in C++ with
 
 ![Tracklayer](docs/screenshot.png)
 
-## What it does (v0.4)
+## What it does (v0.5)
 
 - **Arrange window**: tracks with coloured regions and waveforms, bar ruler, beat grid, snapping, zoom.
 - **Recording**: arm any number of tracks (R), pick a mono or stereo input per track, and press R to record. The app compensates for latency automatically, and recordings are saved as 24-bit WAVs in the project's `Audio` folder.
 - **Input monitoring** (I) so you can hear yourself through the track.
 - **Editing**: drag regions (between tracks too), trim either edge, split at the playhead (Ctrl+T), delete. Hold Alt to drag without snapping.
+- **Undo / redo** (Ctrl+Z / Ctrl+Shift+Z, Cmd on Mac) for region edits, recording, importing, tracks, mixer moves, tempo, plugins and drummer changes. Deleted tracks come back with their plugins and settings.
 - **Cycle mode**: drag in the yellow strip at the top of the ruler and click it to toggle, like Logic.
 - **Metronome**, tempo (drag or double-click the LCD), and a bars/beats/div/tick display.
 - **Mixer** (X): faders, pan, mute/solo, peak meters, Stereo Out.
 - **Plugins**: VST3 on Windows and Mac, plus Audio Units on Mac. Each track has six Audio FX insert slots on its mixer strip: click an empty slot to add an effect, click it again to open its window, right-click to bypass, replace or remove it. Plugin settings are saved in the project. Find your plugins with **File → Plugin Manager → Scan / Options → Scan for new or updated VST3 plug-ins**.
 - **MIDI keyboards and instruments**: any USB MIDI keyboard is switched on automatically (the MIDI light on the display flashes when it's sending). Add an instrument track with **Ctrl+Alt+S**, pick a synth plugin (VST3 instrument, or AU on Mac), and play: the selected instrument track always hears the keyboard. Arm it (R) and press R to record MIDI regions, which you can move, trim and split like audio and which draw their notes in the arrange window.
+- **Session Drummer** (Ctrl+Alt+U): a drummer track that writes General MIDI drum parts for any drum plugin. Pick a style (rock and indie), then set Simple–Complex, Soft–Loud and how many fills. Regions follow the project's tempo and bars; resize or split them and the drummer rewrites the part. Double-click a drummer region for its settings, or right-click to convert it to ordinary MIDI.
 - **Built-in instruments and amp** (under "Tracklayer" in the plugin menus, nothing to install):
   - **Tracklayer Keys**: a sampled grand piano (three velocity layers) and an FM electric piano with tremolo. Presets: Grand, Bright, Felt, Electric, Tremolo EP.
   - **Tracklayer Synth**: two-oscillator analogue-style synth with filter envelope, chorus and reverb. Presets: Warm Pad, Synth Bass, Bright Lead, Soft Strings, Brass Stab, Pluck.
@@ -87,9 +89,9 @@ Tracklayer.exe --bounce "My Song.tlproj" "Mix.wav"     render without opening th
 
 ## Roadmap
 
-1. Undo/redo
+1. Time signature controls, piano roll and quantise
 2. Built-in amp slot for TONE3000 / NAM captures and cab IRs
-3. Piano roll editing, quantise, controller mapping (transport buttons, knobs)
+3. Controller mapping (transport buttons, knobs), a drummer that follows your playing
 4. Plugin latency compensation, sends, buses and automation
 5. Importing Logic projects: stems and MIDI first, then AAF, then reading `.logicx` directly
 

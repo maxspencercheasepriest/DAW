@@ -26,7 +26,7 @@ public:
 
     /** Puts a plugin in a slot (nullptr empties it). Returns the plugin it replaced,
         which the caller must delete after closing its editor window. */
-    std::unique_ptr<juce::AudioPluginInstance> setInsert (Track&, int slot, std::unique_ptr<juce::AudioPluginInstance>,
+    std::shared_ptr<juce::AudioPluginInstance> setInsert (Track&, int slot, std::shared_ptr<juce::AudioPluginInstance>,
                                                          const juce::PluginDescription& = {});
     /** Creates a plugin. If found via the scanned list instead, `d` is updated to that entry. */
     std::unique_ptr<juce::AudioPluginInstance> createPlugin (juce::PluginDescription& d, juce::String& error);
@@ -43,8 +43,9 @@ public:
     juce::File projectFolder;   // recordings go to <projectFolder>/Audio
     bool dirty = false;
 
-    std::atomic<double> tempo { 120.0 };
-    int beatsPerBar = 4;
+    std::atomic<double> tempo { 120.0 };   // quarter notes per minute
+    int beatsPerBar = 4;                    // time signature numerator
+    int beatUnit = 4;                       // time signature denominator (4 or 8, also 2/16)
     std::atomic<bool>   cycleOn { false }, metronomeOn { false };
     std::atomic<double> cycleStart { 0.0 }, cycleEnd { 8.0 };
     std::atomic<float>  masterVolume { 1.0f };
@@ -61,9 +62,58 @@ public:
     double getPosition() const;
     void setPosition (double seconds);
     double getSampleRate() const    { return sampleRate.load(); }
-    double secondsPerBeat() const   { return 60.0 / tempo.load(); }
+    double secondsPerBeat() const   { return 60.0 / tempo.load() * 4.0 / beatUnit; }   // one beat unit
     double secondsPerBar() const    { return secondsPerBeat() * beatsPerBar; }
     juce::int64 getRecordingStart (const Track&) const;
+
+    // Tempo and time signature changes keep MIDI regions on their bars
+    // (audio stays where it is, as recordings can't follow tempo).
+    void setTempo (double bpm);
+    void setTimeSignature (int numerator, int denominator);
+
+    // ---- Session Drummer ----------------------------------------------
+    TrackPtr addDrummerTrack();
+    ClipPtr addDrummerRegion (const TrackPtr&, int startBar, int bars);
+    void regenerateDrummer (Clip&);                 // rebuild notes from its settings (call under lock if live)
+    void conformDrummerRegion (const ClipPtr&);     // snap to whole bars after a move/resize, then rebuild
+    void updateDrummer (const ClipPtr&, const DrummerSettings&);
+    void convertToMidi (const ClipPtr&);
+
+    // ---- undo / redo --------------------------------------------------
+    struct TrackSnap
+    {
+        TrackPtr track;
+        juce::String name;
+        juce::Colour colour;
+        float volume = 1.0f, pan = 0.0f;
+        bool mute = false, solo = false, stereoInput = false;
+        int inputChannel = 0;
+        std::vector<Clip> clips;
+        std::array<std::shared_ptr<juce::AudioPluginInstance>, numInserts> inserts;
+        std::array<bool, numInserts> bypassed {};
+        std::array<juce::PluginDescription, numInserts> insertInfo;
+        std::shared_ptr<juce::AudioPluginInstance> instrument;
+        juce::PluginDescription instrumentInfo;
+    };
+
+    struct Snapshot
+    {
+        juce::String label;
+        std::vector<TrackSnap> tracks;
+        double tempo = 120.0;
+        int beatsPerBar = 4, beatUnit = 4;
+        float master = 1.0f;
+    };
+
+    void commit (const juce::String& label);   // call after every finished edit
+    bool undo();
+    bool redo();
+    bool canUndo() const { return ! undoStack.empty(); }
+    bool canRedo() const { return ! redoStack.empty(); }
+    juce::String undoLabel() const { return undoStack.empty() ? juce::String() : undoStack.back().label; }
+    juce::String redoLabel() const { return redoStack.empty() ? juce::String() : redoStack.back().label; }
+    void resetHistory();
+    std::vector<juce::AudioProcessor*> livePlugins() const;
 
     // ---- editing ------------------------------------------------------
     TrackPtr addTrack (juce::String name = {}, bool instrument = false);
@@ -111,6 +161,11 @@ private:
     void finishRecording();
     juce::File newRecordingFile (const juce::String& trackName);
     void clearTracks();
+    Snapshot capture() const;
+    void restore (const Snapshot&);
+    std::vector<Snapshot> undoStack, redoStack;
+    std::unique_ptr<Snapshot> baseline;
+    static constexpr size_t maxUndo = 100;
 
     std::atomic<juce::int64> positionSamples { 0 };
     std::atomic<double> sampleRate { 44100.0 };

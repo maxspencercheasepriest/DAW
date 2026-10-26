@@ -119,10 +119,16 @@ public:
         onTextChange = [this]
         {
             const double v = getText().getDoubleValue();
-            if (v >= 20.0 && v <= 300.0) { engine.tempo = v; engine.dirty = true; }
+            if (v >= 20.0 && v <= 300.0)
+            {
+                engine.setTempo (v);
+                if (onTempoCommitted) onTempoCommitted();
+            }
             refresh();
         };
     }
+
+    std::function<void()> onTempoCommitted;
 
     void refresh()
     {
@@ -136,14 +142,22 @@ public:
     {
         const double fine = e.mods.isShiftDown() ? 0.01 : 0.25;
         const double v = juce::jlimit (20.0, 300.0, dragStart - e.getDistanceFromDragStartY() * fine);
-        engine.tempo = std::round (v * 100.0) / 100.0;
-        engine.dirty = true;
+        engine.setTempo (std::round (v * 100.0) / 100.0);   // MIDI and drummer regions follow
+        dragged = true;
         refresh();
+    }
+
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        juce::Label::mouseUp (e);
+        if (dragged && onTempoCommitted) onTempoCommitted();
+        dragged = false;
     }
 
 private:
     Engine& engine;
     double dragStart = 120.0;
+    bool dragged = false;
 };
 
 //==============================================================================
@@ -151,6 +165,8 @@ private:
 class Lcd : public juce::Component
 {
 public:
+    void setOnTempoCommitted (std::function<void()> f) { tempo.onTempoCommitted = std::move (f); }
+
     explicit Lcd (Engine& e) : engine (e), tempo (e)
     {
         addAndMakeVisible (tempo);
@@ -287,6 +303,7 @@ public:
         add (metroB, cmdMetronome);
 
         addAndMakeVisible (lcd);
+        lcd.setOnTempoCommitted ([this] { ctx.commitEdit ("Tempo Change"); });
 
         master.setSliderStyle (juce::Slider::LinearHorizontal);
         master.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -301,6 +318,7 @@ public:
             ctx.engine.masterVolume = Theme::dbToGain (master.getValue());
             if (ctx.mixChanged) ctx.mixChanged();
         };
+        master.onDragEnd = [this] { ctx.commitEdit ("Master Volume"); };
         Theme::noFocus (master);
         addAndMakeVisible (master);
 

@@ -23,6 +23,7 @@ public:
             else                  ctx.engine.masterVolume = g;
             changed();
         };
+        fader.onDragEnd = [this] { ctx.commitEdit (track != nullptr ? "Volume" : "Master Volume"); };
         Theme::noFocus (fader);
         addAndMakeVisible (fader);
 
@@ -35,6 +36,7 @@ public:
             pan.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
             pan.setTooltip ("Pan (double-click to centre)");
             pan.onValueChange = [this] { track->pan = (float) pan.getValue(); changed(); };
+            pan.onDragEnd = [this] { ctx.commitEdit ("Pan"); };
             Theme::noFocus (pan);
             addAndMakeVisible (pan);
 
@@ -42,8 +44,8 @@ public:
             setupToggle (soloB, "S", Theme::solo, "Solo");
             setupToggle (armB, "R", Theme::record, "Record enable");
             setupToggle (monB, "I", Theme::monitor, "Input monitoring");
-            muteB.onClick = [this] { track->mute = muteB.getToggleState(); changed(); };
-            soloB.onClick = [this] { track->solo = soloB.getToggleState(); changed(); };
+            muteB.onClick = [this] { track->mute = muteB.getToggleState(); changed(); ctx.commitEdit ("Mute"); };
+            soloB.onClick = [this] { track->solo = soloB.getToggleState(); changed(); ctx.commitEdit ("Solo"); };
             monB.onClick  = [this] { track->monitor = monB.getToggleState(); changed(); };
             armB.onClick  = [this]
             {
@@ -54,7 +56,7 @@ public:
             for (auto* b : { &muteB, &soloB, &armB, &monB })
                 addAndMakeVisible (b);
 
-            input.onChange = [this] { applyInputChoice (input.getSelectedId(), *track); ctx.engine.dirty = true; };
+            input.onChange = [this] { applyInputChoice (input.getSelectedId(), *track); ctx.engine.dirty = true; ctx.commitEdit ("Change Input"); };
             input.setTooltip ("Input channel");
             Theme::noFocus (input);
             if (track->isInstrument)

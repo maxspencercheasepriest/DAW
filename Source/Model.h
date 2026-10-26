@@ -10,11 +10,26 @@ struct MidiNote
     int note = 60, velocity = 100;
 };
 
+// Settings for a Session Drummer region. The region's notes are generated from these.
+struct DrummerSettings
+{
+    int style = 0;
+    float complexity = 0.4f;   // simple .. complex
+    float loudness = 0.6f;     // soft .. loud
+    float fills = 0.5f;        // none .. lots
+    float swing = 0.0f;
+    int cymbal = 0;            // 0 auto, 1 hi-hat, 2 ride
+    int seed = 1;              // "variation"
+    int startBar = 0;          // region position in bars (0-based)
+    int bars = 8;
+};
+
 // A region on the timeline: either audio (the whole file is held in memory)
 // or MIDI (a list of notes).
 struct Clip
 {
     bool isMidi = false;
+    std::shared_ptr<DrummerSettings> drummer;                 // set for Session Drummer regions
     juce::String name;                                        // MIDI regions only
     std::shared_ptr<const std::vector<MidiNote>> notes;       // MIDI regions only
 
@@ -60,13 +75,14 @@ struct Track
     std::vector<ClipPtr> clips;
 
     // Effect plugins, processed top to bottom. Changed only under Engine::lock.
-    std::array<std::unique_ptr<juce::AudioPluginInstance>, numInserts> inserts;
+    std::array<std::shared_ptr<juce::AudioPluginInstance>, numInserts> inserts;   // shared so undo can keep removed ones
     std::array<std::atomic<bool>, numInserts> bypassed {};
     std::array<juce::PluginDescription, numInserts> insertInfo;   // what each slot was loaded from
 
     // Instrument tracks play MIDI regions and live MIDI through a synth plugin.
     bool isInstrument = false;
-    std::unique_ptr<juce::AudioPluginInstance> instrument;
+    bool isDrummer = false;    // a Session Drummer track (an instrument track with drummer regions)
+    std::shared_ptr<juce::AudioPluginInstance> instrument;
     juce::PluginDescription instrumentInfo;
 
     // slot -1 = the instrument, 0.. = Audio FX inserts

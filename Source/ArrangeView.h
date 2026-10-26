@@ -57,6 +57,7 @@ public:
             if (n.isNotEmpty()) track->name = n;
             ctx.engine.dirty = true;
             if (ctx.tracksChanged) ctx.tracksChanged();
+            ctx.commitEdit ("Rename Track");
         };
         addAndMakeVisible (name);
 
@@ -64,8 +65,8 @@ public:
         setupToggle (soloB, "S", Theme::solo, "Solo");
         setupToggle (armB, "R", Theme::record, "Record enable");
         setupToggle (monB, "I", Theme::monitor, "Input monitoring (hear the input while armed)");
-        muteB.onClick = [this] { track->mute = muteB.getToggleState(); changed(); };
-        soloB.onClick = [this] { track->solo = soloB.getToggleState(); changed(); };
+        muteB.onClick = [this] { track->mute = muteB.getToggleState(); changed(); ctx.commitEdit ("Mute"); };
+        soloB.onClick = [this] { track->solo = soloB.getToggleState(); changed(); ctx.commitEdit ("Solo"); };
         monB.onClick  = [this] { track->monitor = monB.getToggleState(); changed(); };
         armB.onClick  = [this]
         {
@@ -77,7 +78,7 @@ public:
             addAndMakeVisible (b);
 
         input.setTooltip ("Input channel");
-        input.onChange = [this] { applyInputChoice (input.getSelectedId(), *track); ctx.engine.dirty = true; };
+        input.onChange = [this] { applyInputChoice (input.getSelectedId(), *track); ctx.engine.dirty = true; ctx.commitEdit ("Change Input"); };
         Theme::noFocus (input);
 
         if (track->isInstrument)
@@ -100,6 +101,7 @@ public:
         volume.setPopupDisplayEnabled (true, true, nullptr);
         volume.setTooltip ("Volume (double-click for 0 dB)");
         volume.onValueChange = [this] { track->volume = Theme::dbToGain (volume.getValue()); changed(); };
+        volume.onDragEnd = [this] { ctx.commitEdit ("Volume"); };
         Theme::noFocus (volume);
         addAndMakeVisible (volume);
 
@@ -324,7 +326,7 @@ public:
         if (e.mods.isPopupMenu())
         {
             drag = Drag::none;
-            showContextMenu (clip);
+            showContextMenu (clip, ctx.view.xToSec (e.position.x));
         }
     }
 
@@ -383,10 +385,30 @@ public:
         repaint();
     }
 
-    void mouseUp (const juce::MouseEvent&) override  { drag = Drag::none; }
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        const auto finished = drag;
+        drag = Drag::none;
+        if (! dragChanged || ctx.view.selectedClip == nullptr)
+            return;
+
+        dragChanged = false;
+        auto clip = ctx.view.selectedClip;
+        if (clip->drummer != nullptr)
+            ctx.engine.conformDrummerRegion (clip);   // drummer regions snap to whole bars
+        ctx.commitEdit (finished == Drag::move ? "Move Region" : "Resize Region");
+        repaint();
+    }
 
     void mouseDoubleClick (const juce::MouseEvent& e) override
     {
+        ClipPtr clip; int idx = -1;
+        if (hitTestClip (e.position, clip, idx) != Drag::none && clip->drummer != nullptr)
+        {
+            if (ctx.openDrummer) ctx.openDrummer (clip);
+            return;
+        }
+
         // double-click empty space below the tracks to add a track
         if (e.position.y > (float) (ctx.engine.tracks.size() * (size_t) ctx.view.trackHeight))
             ctx.runCommand (cmdNewTrack);
@@ -447,6 +469,7 @@ public:
         if (ctx.tracksChanged) ctx.tracksChanged();
         if (errors.size() > 0 && ctx.showMessage)
             ctx.showMessage ("Import", errors.joinIntoString ("\n"));
+        ctx.commitEdit ("Import Audio");
         repaint();
     }
 
@@ -574,18 +597,43 @@ private:
         }
     }
 
-    void showContextMenu (const ClipPtr& clip)
+    void showContextMenu (const ClipPtr& clip, double atSec)
     {
         juce::PopupMenu m;
         if (clip != nullptr)
         {
+            if (clip->drummer != nullptr)
+            {
+                m.addItem ("Drummer Settings...", [this, clip] { if (ctx.openDrummer) ctx.openDrummer (clip); });
+                m.addItem ("Convert to MIDI Region", [this, clip]
+                {
+                    ctx.engine.convertToMidi (clip);
+                    ctx.commitEdit ("Convert to MIDI");
+                    repaint();
+                });
+            }
             m.addItem ("Split at Playhead", [this] { ctx.runCommand (cmdSplitAtPlayhead); });
             m.addItem ("Delete Region", [this] { ctx.runCommand (cmdDeleteClip); });
+            m.addSeparator();
+        }
+
+        auto track = ctx.view.selectedTrack;
+        if (clip == nullptr && track != nullptr && track->isDrummer)
+        {
+            m.addItem ("Add Drummer Region Here", [this, track, atSec]
+            {
+                const int bar = juce::jmax (0, (int) std::floor (atSec / ctx.engine.secondsPerBar()));
+                auto c = ctx.engine.addDrummerRegion (track, bar, 8);
+                ctx.view.selectedClip = c;
+                ctx.commitEdit ("Add Drummer Region");
+                repaint();
+            });
             m.addSeparator();
         }
         m.addItem ("Import Audio File...", [this] { ctx.runCommand (cmdImportAudio); });
         m.addItem ("New Audio Track", [this] { ctx.runCommand (cmdNewTrack); });
         m.addItem ("New Instrument Track", [this] { ctx.runCommand (cmdNewInstrumentTrack); });
+        m.addItem ("New Drummer Track", [this] { ctx.runCommand (cmdNewDrummerTrack); });
         m.showMenuAsync (juce::PopupMenu::Options());
     }
 
@@ -800,6 +848,7 @@ public:
             juce::PopupMenu m;
             m.addItem ("New Audio Track", [this] { ctx.runCommand (cmdNewTrack); });
             m.addItem ("New Instrument Track", [this] { ctx.runCommand (cmdNewInstrumentTrack); });
+            m.addItem ("New Drummer Track", [this] { ctx.runCommand (cmdNewDrummerTrack); });
             m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&addTrackB));
         };
         Theme::noFocus (addTrackB);

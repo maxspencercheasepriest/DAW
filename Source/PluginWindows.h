@@ -87,6 +87,13 @@ public:
 
     void closeAll() { windows.clear(); }
 
+    void closeAllExcept (const std::vector<juce::AudioProcessor*>& keep)
+    {
+        for (int i = windows.size(); --i >= 0;)
+            if (std::find (keep.begin(), keep.end(), (juce::AudioProcessor*) &windows[i]->plugin) == keep.end())
+                windows.remove (i);
+    }
+
 private:
     AppContext& ctx;
     juce::OwnedArray<PluginWindow> windows;

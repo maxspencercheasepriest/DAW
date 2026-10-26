@@ -1,5 +1,6 @@
 #include "Engine.h"
 #include "BuiltIn.h"
+#include "Drummer.h"
 
 using namespace juce;
 
@@ -443,10 +444,22 @@ bool Engine::splitClip (const ClipPtr& c, double at)
     right->start  = at;
     right->offset = c->offset + (at - c->start);
     right->length = c->end() - at;
+    if (c->drummer != nullptr)
+        right->drummer = std::make_shared<DrummerSettings> (*c->drummer);
 
     const ScopedLock sl (lock);
     c->length = at - c->start;
     owner->clips.push_back (right);
+    if (c->drummer != nullptr)
+    {
+        const double bar = secondsPerBar();
+        c->drummer->startBar = jmax (0, roundToInt (c->start / bar));
+        c->drummer->bars = jmax (1, roundToInt (at / bar) - c->drummer->startBar);
+        right->drummer->startBar = c->drummer->startBar + c->drummer->bars;
+        right->drummer->bars = jmax (1, roundToInt (right->end() / bar) - right->drummer->startBar);
+        regenerateDrummer (*c);
+        regenerateDrummer (*right);
+    }
     dirty = true;
     return true;
 }
@@ -487,6 +500,322 @@ StringArray Engine::getActiveInputNames() const
 }
 
 //==============================================================================
+// Tempo & time signature
+//==============================================================================
+void Engine::setTempo (double bpm)
+{
+    bpm = jlimit (20.0, 300.0, bpm);
+    const double old = tempo.load();
+    if (approximatelyEqual (old, bpm))
+        return;
+
+    const double r = old / bpm;   // how much every musical time stretches
+
+    const ScopedLock sl (lock);
+    tempo = bpm;
+
+    for (auto& t : tracks)
+    {
+        for (auto& c : t->clips)
+        {
+            if (! c->isMidi) continue;   // audio can't follow tempo; it stays put
+            if (c->drummer != nullptr) { regenerateDrummer (*c); continue; }
+
+            c->start *= r;
+            c->offset *= r;
+            c->length *= r;
+            if (c->notes != nullptr)
+            {
+                auto scaled = std::make_shared<std::vector<MidiNote>> (*c->notes);
+                for (auto& n : *scaled) { n.time *= r; n.length *= r; }
+                c->notes = scaled;
+            }
+        }
+    }
+
+    cycleStart = cycleStart.load() * r;
+    cycleEnd = cycleEnd.load() * r;
+    jumped = true;
+    dirty = true;
+}
+
+void Engine::setTimeSignature (int numerator, int denominator)
+{
+    const ScopedLock sl (lock);
+    beatsPerBar = jlimit (1, 32, numerator);
+    beatUnit = (denominator == 2 || denominator == 8 || denominator == 16) ? denominator : 4;
+
+    for (auto& t : tracks)
+        for (auto& c : t->clips)
+            if (c->drummer != nullptr)
+                regenerateDrummer (*c);
+
+    jumped = true;
+    dirty = true;
+}
+
+//==============================================================================
+// Session Drummer
+//==============================================================================
+void Engine::regenerateDrummer (Clip& c)
+{
+    if (c.drummer == nullptr)
+        return;
+
+    auto& d = *c.drummer;
+    const double bar = secondsPerBar();
+    c.isMidi = true;
+    c.start = d.startBar * bar;
+    c.offset = 0.0;
+    c.length = jmax (1, d.bars) * bar;
+    c.name = "Drummer: " + Drummer::styleNames()[d.style].fromFirstOccurrenceOf ("- ", false, false);
+    c.notes = std::make_shared<std::vector<MidiNote>> (Drummer::generate (d, tempo.load(), beatsPerBar, beatUnit));
+}
+
+ClipPtr Engine::addDrummerRegion (const TrackPtr& t, int startBar, int bars)
+{
+    if (t == nullptr)
+        return {};
+
+    auto c = std::make_shared<Clip>();
+    c->drummer = std::make_shared<DrummerSettings>();
+    c->drummer->startBar = jmax (0, startBar);
+    c->drummer->bars = jmax (1, bars);
+    c->drummer->seed = Random::getSystemRandom().nextInt (100000) + 1;
+
+    // carry on the feel of the previous drummer region on this track
+    ClipPtr prev;
+    for (auto& other : t->clips)
+        if (other->drummer != nullptr && other->drummer->startBar < startBar
+            && (prev == nullptr || other->drummer->startBar > prev->drummer->startBar))
+            prev = other;
+    if (prev != nullptr)
+    {
+        auto seed = c->drummer->seed;
+        *c->drummer = *prev->drummer;
+        c->drummer->seed = seed;
+        c->drummer->startBar = jmax (0, startBar);
+        c->drummer->bars = jmax (1, bars);
+    }
+
+    regenerateDrummer (*c);
+    const ScopedLock sl (lock);
+    t->clips.push_back (c);
+    dirty = true;
+    return c;
+}
+
+TrackPtr Engine::addDrummerTrack()
+{
+    auto t = addTrack ("Drummer", true);
+    t->isDrummer = true;
+    t->colour = Colour (0xffe8c547);
+
+    // cover the song so far (at least 8 bars)
+    const double bar = secondsPerBar();
+    const int bars = jmax (8, (int) std::ceil (getProjectEnd() / bar - 0.01));
+    addDrummerRegion (t, 0, bars);
+    return t;
+}
+
+void Engine::conformDrummerRegion (const ClipPtr& c)
+{
+    if (c == nullptr || c->drummer == nullptr)
+        return;
+
+    const double bar = secondsPerBar();
+    const ScopedLock sl (lock);
+    c->drummer->startBar = jmax (0, roundToInt (c->start / bar));
+    c->drummer->bars = jmax (1, roundToInt (c->length / bar));
+    regenerateDrummer (*c);
+    dirty = true;
+}
+
+void Engine::updateDrummer (const ClipPtr& c, const DrummerSettings& s)
+{
+    if (c == nullptr || c->drummer == nullptr)
+        return;
+
+    const ScopedLock sl (lock);
+    const int startBar = c->drummer->startBar, bars = c->drummer->bars;
+    *c->drummer = s;
+    c->drummer->startBar = startBar;
+    c->drummer->bars = bars;
+    regenerateDrummer (*c);
+    dirty = true;
+}
+
+void Engine::convertToMidi (const ClipPtr& c)
+{
+    if (c == nullptr || c->drummer == nullptr)
+        return;
+
+    const ScopedLock sl (lock);
+    c->drummer = nullptr;
+    c->name = "Drums";
+    dirty = true;
+}
+
+//==============================================================================
+// Undo / redo (whole-project snapshots; audio and plugins are shared, not copied)
+//==============================================================================
+Engine::Snapshot Engine::capture() const
+{
+    Snapshot s;
+    s.tempo = tempo.load();
+    s.beatsPerBar = beatsPerBar;
+    s.beatUnit = beatUnit;
+    s.master = masterVolume.load();
+
+    for (auto& tp : tracks)
+    {
+        auto& t = *tp;
+        TrackSnap ts;
+        ts.track = tp;
+        ts.name = t.name;
+        ts.colour = t.colour;
+        ts.volume = t.volume.load();
+        ts.pan = t.pan.load();
+        ts.mute = t.mute.load();
+        ts.solo = t.solo.load();
+        ts.stereoInput = t.stereoInput.load();
+        ts.inputChannel = t.inputChannel.load();
+        for (auto& c : t.clips)
+        {
+            ts.clips.push_back (*c);
+            if (c->drummer != nullptr)
+                ts.clips.back().drummer = std::make_shared<DrummerSettings> (*c->drummer);
+        }
+        for (size_t i = 0; i < (size_t) numInserts; ++i)
+        {
+            ts.inserts[i] = t.inserts[i];
+            ts.bypassed[i] = t.bypassed[i].load();
+            ts.insertInfo[i] = t.insertInfo[i];
+        }
+        ts.instrument = t.instrument;
+        ts.instrumentInfo = t.instrumentInfo;
+        s.tracks.push_back (std::move (ts));
+    }
+    return s;
+}
+
+std::vector<AudioProcessor*> Engine::livePlugins() const
+{
+    std::vector<AudioProcessor*> live;
+    for (auto& t : tracks)
+    {
+        for (auto& p : t->inserts)
+            if (p != nullptr) live.push_back (p.get());
+        if (t->instrument != nullptr) live.push_back (t->instrument.get());
+    }
+    return live;
+}
+
+void Engine::restore (const Snapshot& s)
+{
+    // Plugins coming back from the history were released when removed: prepare them
+    // again before the audio thread can see them. Live ones are left alone.
+    const auto live = livePlugins();
+    auto isLive = [&live] (AudioProcessor* p) { return std::find (live.begin(), live.end(), p) != live.end(); };
+    for (auto& ts : s.tracks)
+    {
+        for (auto& p : ts.inserts)
+            if (p != nullptr && ! isLive (p.get())) preparePlugin (*p);
+        if (ts.instrument != nullptr && ! isLive (ts.instrument.get())) preparePlugin (*ts.instrument);
+    }
+
+    const ScopedLock sl (lock);
+    tracks.clear();
+    for (auto& ts : s.tracks)
+    {
+        auto& t = *ts.track;
+        t.name = ts.name;
+        t.colour = ts.colour;
+        t.volume = ts.volume;
+        t.pan = ts.pan;
+        t.mute = ts.mute;
+        t.solo = ts.solo;
+        t.stereoInput = ts.stereoInput;
+        t.inputChannel = ts.inputChannel;
+        t.clips.clear();
+        for (auto& c : ts.clips)
+        {
+            auto copy = std::make_shared<Clip> (c);
+            if (c.drummer != nullptr)
+                copy->drummer = std::make_shared<DrummerSettings> (*c.drummer);
+            t.clips.push_back (copy);
+        }
+        for (size_t i = 0; i < (size_t) numInserts; ++i)
+        {
+            t.inserts[i] = ts.inserts[i];
+            t.bypassed[i] = ts.bypassed[i];
+            t.insertInfo[i] = ts.insertInfo[i];
+        }
+        t.instrument = ts.instrument;
+        t.instrumentInfo = ts.instrumentInfo;
+        for (auto& ch : t.soundingNotes) ch.reset();
+        tracks.push_back (ts.track);
+    }
+
+    tempo = s.tempo;
+    beatsPerBar = s.beatsPerBar;
+    beatUnit = s.beatUnit;
+    masterVolume = s.master;
+    jumped = true;
+    dirty = true;
+}
+
+void Engine::commit (const String& label)
+{
+    if (baseline == nullptr)
+        baseline = std::make_unique<Snapshot> (capture());
+
+    baseline->label = label;
+    undoStack.push_back (std::move (*baseline));
+    if (undoStack.size() > maxUndo)
+        undoStack.erase (undoStack.begin());
+    redoStack.clear();
+    baseline = std::make_unique<Snapshot> (capture());
+}
+
+bool Engine::undo()
+{
+    if (undoStack.empty() || recording)
+        return false;
+
+    auto target = std::move (undoStack.back());
+    undoStack.pop_back();
+    auto current = capture();
+    current.label = target.label;
+    redoStack.push_back (std::move (current));
+    restore (target);
+    baseline = std::make_unique<Snapshot> (capture());
+    return true;
+}
+
+bool Engine::redo()
+{
+    if (redoStack.empty() || recording)
+        return false;
+
+    auto target = std::move (redoStack.back());
+    redoStack.pop_back();
+    auto current = capture();
+    current.label = target.label;
+    undoStack.push_back (std::move (current));
+    restore (target);
+    baseline = std::make_unique<Snapshot> (capture());
+    return true;
+}
+
+void Engine::resetHistory()
+{
+    undoStack.clear();
+    redoStack.clear();
+    baseline = std::make_unique<Snapshot> (capture());
+}
+
+//==============================================================================
 // Project files (.tlproj = JSON)
 //==============================================================================
 void Engine::clearTracks()
@@ -504,6 +833,8 @@ void Engine::newProject()
                         .getChildFile ("Tracklayer Projects")
                         .getChildFile ("Untitled " + Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M"));
     tempo = 120.0;
+    beatsPerBar = 4;
+    beatUnit = 4;
     cycleOn = false;
     cycleStart = 0.0;
     cycleEnd = secondsPerBar() * 4.0;
@@ -528,6 +859,7 @@ bool Engine::saveProject (const File& file, String& error)
     root->setProperty ("version", 1);
     root->setProperty ("tempo", tempo.load());
     root->setProperty ("beatsPerBar", beatsPerBar);
+    root->setProperty ("beatUnit", beatUnit);
     root->setProperty ("cycleOn", cycleOn.load());
     root->setProperty ("cycleStart", cycleStart.load());
     root->setProperty ("cycleEnd", cycleEnd.load());
@@ -559,6 +891,20 @@ bool Engine::saveProject (const File& file, String& error)
                         noteList.add (Array<var> { nt.time, nt.length, nt.note, nt.velocity });
                 co->setProperty ("name", c->name);
                 co->setProperty ("midi", noteList);
+                if (auto d = c->drummer)
+                {
+                    auto dobj = std::make_unique<DynamicObject>();
+                    dobj->setProperty ("style", d->style);
+                    dobj->setProperty ("complexity", d->complexity);
+                    dobj->setProperty ("loudness", d->loudness);
+                    dobj->setProperty ("fills", d->fills);
+                    dobj->setProperty ("swing", d->swing);
+                    dobj->setProperty ("cymbal", d->cymbal);
+                    dobj->setProperty ("seed", d->seed);
+                    dobj->setProperty ("startBar", d->startBar);
+                    dobj->setProperty ("bars", d->bars);
+                    co->setProperty ("drummer", var (dobj.release()));
+                }
             }
             else
             {
@@ -593,6 +939,7 @@ bool Engine::saveProject (const File& file, String& error)
         to->setProperty ("plugins", pluginList);
 
         to->setProperty ("instrumentTrack", t->isInstrument);
+        to->setProperty ("drummerTrack", t->isDrummer);
         if (t->instrument != nullptr)
         {
             MemoryBlock state;
@@ -668,6 +1015,20 @@ bool Engine::loadProject (const File& file, String& error)
                         c->start  = (double) cv["start"];
                         c->offset = jmax (0.0, (double) cv["offset"]);
                         c->length = jmax (0.01, (double) cv["length"]);
+                        if (auto dv = cv["drummer"]; dv.isObject())
+                        {
+                            auto d = std::make_shared<DrummerSettings>();
+                            d->style      = jlimit (0, Drummer::styleNames().size() - 1, (int) dv.getProperty ("style", 0));
+                            d->complexity = (float) (double) dv.getProperty ("complexity", 0.4);
+                            d->loudness   = (float) (double) dv.getProperty ("loudness", 0.6);
+                            d->fills      = (float) (double) dv.getProperty ("fills", 0.5);
+                            d->swing      = (float) (double) dv.getProperty ("swing", 0.0);
+                            d->cymbal     = jlimit (0, 2, (int) dv.getProperty ("cymbal", 0));
+                            d->seed       = (int) dv.getProperty ("seed", 1);
+                            d->startBar   = jmax (0, (int) dv.getProperty ("startBar", 0));
+                            d->bars       = jmax (1, (int) dv.getProperty ("bars", 8));
+                            c->drummer = d;
+                        }
                         t->clips.push_back (c);
                         continue;
                     }
@@ -716,6 +1077,7 @@ bool Engine::loadProject (const File& file, String& error)
             }
 
             t->isInstrument = (bool) tv.getProperty ("instrumentTrack", false);
+            t->isDrummer = (bool) tv.getProperty ("drummerTrack", false);
             if (t->isInstrument && tv["instrument"].isObject())
             {
                 auto iv = tv["instrument"];
@@ -750,9 +1112,11 @@ bool Engine::loadProject (const File& file, String& error)
     }
 
     tempo = jlimit (20.0, 300.0, (double) json.getProperty ("tempo", 120.0));
-    beatsPerBar = jlimit (1, 16, (int) json.getProperty ("beatsPerBar", 4));
+    beatsPerBar = jlimit (1, 32, (int) json.getProperty ("beatsPerBar", 4));
     cycleOn = (bool) json.getProperty ("cycleOn", false);
     cycleStart = (double) json.getProperty ("cycleStart", 0.0);
+    beatUnit = (int) json.getProperty ("beatUnit", 4);
+    if (beatUnit != 2 && beatUnit != 8 && beatUnit != 16) beatUnit = 4;
     cycleEnd = (double) json.getProperty ("cycleEnd", secondsPerBar() * 4.0);
     masterVolume = (float) (double) json.getProperty ("masterVolume", 1.0);
     setPosition ((double) json.getProperty ("position", 0.0));
@@ -961,7 +1325,7 @@ std::unique_ptr<AudioPluginInstance> Engine::createPlugin (PluginDescription& d,
     return p;
 }
 
-std::unique_ptr<AudioPluginInstance> Engine::setInsert (Track& t, int slot, std::unique_ptr<AudioPluginInstance> p,
+std::shared_ptr<AudioPluginInstance> Engine::setInsert (Track& t, int slot, std::shared_ptr<AudioPluginInstance> p,
                                                       const PluginDescription& desc)
 {
     if (slot < -1 || slot >= numInserts || (slot == -1 && ! t.isInstrument))
@@ -1368,7 +1732,7 @@ void Engine::renderInstrument (Track& t, int num, int64 pos, double sr, bool pla
 
 void Engine::renderMetronome (AudioBuffer<float>& out, int outOffset, int num, int64 pos, double sr)
 {
-    const double beatLen = sr * 60.0 / tempo.load();
+    const double beatLen = sr * secondsPerBeat();
     float* l = out.getWritePointer (0, outOffset);
     float* r = out.getWritePointer (1, outOffset);
 

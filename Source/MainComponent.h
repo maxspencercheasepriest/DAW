@@ -3,6 +3,7 @@
 #include "TransportBar.h"
 #include "MixerView.h"
 #include "PluginWindows.h"
+#include "DrummerWindow.h"
 
 class MainComponent : public juce::Component,
                       public juce::MenuBarModel,
@@ -50,8 +51,12 @@ private:
     void saveDeviceState();
     void showPluginManager();
     void loadPluginInto (const TrackPtr&, int slot, const juce::PluginDescription&);
-    void disposeLater (std::unique_ptr<juce::AudioPluginInstance>);
+    void disposeLater (std::shared_ptr<juce::AudioPluginInstance>);
     void keepAliveBriefly (std::vector<TrackPtr>);
+    void chooseInstrumentFor (const TrackPtr&, bool drums = false);
+    void commitEdit (const juce::String& label);
+    void undoRedo (bool isUndo);
+    void openDrummer (const ClipPtr&);
 
     juce::ApplicationProperties& properties;
     Theme::LookAndFeel lookAndFeel;
@@ -73,6 +78,8 @@ private:
     // declared last so they're destroyed before the plugins they show
     PluginWindowManager pluginWindows { ctx };
     std::unique_ptr<PluginManagerWindow> pluginManager;
+    std::unique_ptr<DrummerWindow> drummerWindow;
+    double lastTempo = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

@@ -16,10 +16,13 @@ enum CommandIDs
 
     cmdDeleteClip = 100,
     cmdSplitAtPlayhead,
+    cmdUndo,
+    cmdRedo,
 
     cmdNewTrack = 200,
     cmdDeleteTrack,
     cmdNewInstrumentTrack,
+    cmdNewDrummerTrack,
 
     cmdPlayStop = 300,
     cmdRecord,
@@ -63,6 +66,13 @@ struct AppContext
     std::function<void()> selectionChanged;
     std::function<void (int)> runCommand;
     std::function<void (const juce::String&, const juce::String&)> showMessage;
+
+    // undo: call after every finished edit, with a short name for the Edit menu
+    std::function<void (const juce::String&)> commit;
+    void commitEdit (const juce::String& label) { if (commit) commit (label); }
+
+    // Session Drummer
+    std::function<void (const ClipPtr&)> openDrummer;
 
     // plugin slots
     std::function<void (const TrackPtr&, int slot, const juce::PluginDescription&)> loadPlugin;
