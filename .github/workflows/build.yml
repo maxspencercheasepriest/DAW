@@ -15,3 +15,21 @@ jobs:
         with:
           name: Tracklayer-Windows
           path: build/Tracklayer_artefacts/Release/Tracklayer.exe
+
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -B build -G Xcode -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      - run: cmake --build build --config Release -- -quiet
+      - name: Sign (ad-hoc) and zip
+        run: |
+          cd build/Tracklayer_artefacts/Release
+          codesign --force --deep --sign - Tracklayer.app
+          codesign --verify --verbose Tracklayer.app
+          lipo -info Tracklayer.app/Contents/MacOS/Tracklayer
+          ditto -c -k --keepParent Tracklayer.app Tracklayer-mac.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Tracklayer-Mac
+          path: build/Tracklayer_artefacts/Release/Tracklayer-mac.zip
