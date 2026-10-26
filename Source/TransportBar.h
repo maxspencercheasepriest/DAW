@@ -162,7 +162,7 @@ private:
 
 //==============================================================================
 // Logic-style LCD: bars/beats/division/ticks, clock time, tempo, signature.
-class Lcd : public juce::Component
+class Lcd : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     void setOnTempoCommitted (std::function<void()> f) { tempo.onTempoCommitted = std::move (f); }
@@ -235,7 +235,7 @@ public:
         g.drawText ("SIGNATURE", sig.removeFromBottom (12), juce::Justification::centred);
         g.setColour (Theme::lcdText);
         g.setFont (Theme::monoFont (20.0f, true));
-        g.drawText (juce::String (bpb) + "/4", sig, juce::Justification::centredBottom);
+        g.drawText (juce::String (bpb) + "/" + juce::String (engine.beatUnit), sig, juce::Justification::centredBottom);
 
         if (engine.isRecording())
         {
@@ -253,6 +253,20 @@ public:
         g.setFont (Theme::font (9.5f, true));
         g.drawText ("MIDI", led, juce::Justification::centredRight);
         g.fillEllipse (led.getX() - 2.0f, led.getCentreY() - 3.0f, 6.0f, 6.0f);
+    }
+
+    std::function<void()> onSignatureClicked;
+
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        if (sigArea.contains (e.getPosition()) && onSignatureClicked)
+            onSignatureClicked();
+    }
+
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        setMouseCursor (sigArea.contains (e.getPosition()) ? juce::MouseCursor::PointingHandCursor
+                                                           : juce::MouseCursor::NormalCursor);
     }
 
     void resized() override
@@ -304,6 +318,32 @@ public:
 
         addAndMakeVisible (lcd);
         lcd.setOnTempoCommitted ([this] { ctx.commitEdit ("Tempo Change"); });
+        lcd.setTooltip ("Click the time signature to change it");
+        lcd.onSignatureClicked = [this]
+        {
+            // common signatures, Logic-style
+            const std::pair<int, int> sigs[] = { { 4, 4 }, { 3, 4 }, { 2, 4 }, { 5, 4 }, { 6, 4 }, { 7, 4 },
+                                                 { 6, 8 }, { 3, 8 }, { 5, 8 }, { 7, 8 }, { 9, 8 }, { 12, 8 }, { 2, 2 } };
+            juce::PopupMenu m;
+            m.addSectionHeader ("Time Signature");
+            int id = 1;
+            for (auto [n, d] : sigs)
+            {
+                const bool current = n == ctx.engine.beatsPerBar && d == ctx.engine.beatUnit;
+                m.addItem (id++, juce::String (n) + "/" + juce::String (d), true, current);
+                if (n == 7 && d == 4) m.addSeparator();
+            }
+            juce::Component::SafePointer<TransportBar> safe (this);
+            m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&lcd), [safe, sigs] (int r)
+            {
+                if (safe == nullptr || r <= 0) return;
+                auto [n, d] = sigs[r - 1];
+                safe->ctx.engine.setTimeSignature (n, d);
+                safe->ctx.commitEdit ("Time Signature");
+                if (safe->ctx.selectionChanged) safe->ctx.selectionChanged();   // redraw grid and regions
+                safe->sync();
+            });
+        };
 
         master.setSliderStyle (juce::Slider::LinearHorizontal);
         master.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);

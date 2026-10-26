@@ -12,7 +12,7 @@ A small Logic-style multitrack recorder for Windows and Mac, written in C++ with
 - **Editing**: drag regions (between tracks too), trim either edge, split at the playhead (Ctrl+T), delete. Hold Alt to drag without snapping.
 - **Undo / redo** (Ctrl+Z / Ctrl+Shift+Z, Cmd on Mac) for region edits, recording, importing, tracks, mixer moves, tempo, plugins and drummer changes. Deleted tracks come back with their plugins and settings.
 - **Cycle mode**: drag in the yellow strip at the top of the ruler and click it to toggle, like Logic.
-- **Metronome**, tempo (drag or double-click the LCD), and a bars/beats/div/tick display.
+- **Metronome**, tempo (drag or double-click the LCD), **time signature** (click it on the LCD: 2/4 to 7/4, 3/8 to 12/8, 2/2) and a bars/beats/div/tick display. MIDI and drummer regions stay on their bars when the tempo changes.
 - **Mixer** (X): faders, pan, mute/solo, peak meters, Stereo Out.
 - **Plugins**: VST3 on Windows and Mac, plus Audio Units on Mac. Each track has six Audio FX insert slots on its mixer strip: click an empty slot to add an effect, click it again to open its window, right-click to bypass, replace or remove it. Plugin settings are saved in the project. Find your plugins with **File → Plugin Manager → Scan / Options → Scan for new or updated VST3 plug-ins**.
 - **MIDI keyboards and instruments**: any USB MIDI keyboard is switched on automatically (the MIDI light on the display flashes when it's sending). Add an instrument track with **Ctrl+Alt+S**, pick a synth plugin (VST3 instrument, or AU on Mac), and play: the selected instrument track always hears the keyboard. Arm it (R) and press R to record MIDI regions, which you can move, trim and split like audio and which draw their notes in the arrange window.
@@ -89,7 +89,7 @@ Tracklayer.exe --bounce "My Song.tlproj" "Mix.wav"     render without opening th
 
 ## Roadmap
 
-1. Time signature controls, piano roll and quantise
+1. Piano roll and quantise
 2. Built-in amp slot for TONE3000 / NAM captures and cab IRs
 3. Controller mapping (transport buttons, knobs), a drummer that follows your playing
 4. Plugin latency compensation, sends, buses and automation
