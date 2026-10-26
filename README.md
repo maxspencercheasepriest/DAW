@@ -1,3 +1,5 @@
+<img src="Resources/icon-1024.png" width="128" align="right" alt="Tracklayer icon">
+
 # Tracklayer
 
 A small Logic-style multitrack recorder for Windows and Mac, written in C++ with [JUCE](https://juce.com).

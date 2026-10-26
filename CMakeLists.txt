@@ -31,7 +31,16 @@ endif()
 # ---------------------------------------------------------------------------
 set(ASIO_SDK_DIR "" CACHE PATH "Path to the Steinberg ASIO SDK (optional)")
 
+# App icon (macOS uses Apple's icon grid with padding; Windows uses the full square)
+if(APPLE)
+    set(TRACKLAYER_ICON "${CMAKE_CURRENT_SOURCE_DIR}/Resources/icon-mac-1024.png")
+else()
+    set(TRACKLAYER_ICON "${CMAKE_CURRENT_SOURCE_DIR}/Resources/icon-1024.png")
+endif()
+
 juce_add_gui_app(Tracklayer
+    ICON_BIG "${TRACKLAYER_ICON}"
+    ICON_SMALL "${TRACKLAYER_ICON}"
     PRODUCT_NAME "Tracklayer"
     COMPANY_NAME "Tracklayer"
     BUNDLE_ID "com.tracklayer.app"
