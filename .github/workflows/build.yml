@@ -4,10 +4,6 @@ on:
   push:
   workflow_dispatch:
 
-defaults:
-  run:
-    working-directory: Tracklayer
-
 jobs:
   windows:
     runs-on: windows-latest
@@ -18,4 +14,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Tracklayer-Windows
-          path: Tracklayer/build/Tracklayer_artefacts/Release/Tracklayer.exe
+          path: build/Tracklayer_artefacts/Release/Tracklayer.exe

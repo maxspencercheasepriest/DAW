@@ -154,10 +154,13 @@ void MainComponent::timerCallback()
     if (meterDivider % 90 == 0)
         engine.enableAllMidiInputs();
 
-    // keep DAW shortcuts working if focus got lost (e.g. after a dialog)
-    if (Component::getCurrentlyFocusedComponent() == nullptr && isShowing() && hasKeyboardFocus (true) == false
-        && getTopLevelComponent()->isCurrentlyBlockedByAnotherModalComponent() == false
-        && Process::isForegroundProcess())
+    // Keep DAW shortcuts working if focus got lost (e.g. after a dialog) - but only
+    // while the main window itself is the active one. Plugin windows (and the text
+    // boxes inside them) must keep the keyboard while you're typing in them.
+    auto* top = dynamic_cast<TopLevelWindow*> (getTopLevelComponent());
+    if (top != nullptr && top->isActiveWindow()
+        && Component::getCurrentlyFocusedComponent() == nullptr && isShowing() && ! hasKeyboardFocus (true)
+        && ! top->isCurrentlyBlockedByAnotherModalComponent())
         grabKeyboardFocus();
 }
 

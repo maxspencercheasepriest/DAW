@@ -4,7 +4,7 @@ A small Logic-style multitrack recorder for Windows and Mac, written in C++ with
 
 ![Tracklayer](docs/screenshot.png)
 
-## What it does (v0.3)
+## What it does (v0.4)
 
 - **Arrange window**: tracks with coloured regions and waveforms, bar ruler, beat grid, snapping, zoom.
 - **Recording**: arm any number of tracks (R), pick a mono or stereo input per track, and press R to record. The app compensates for latency automatically, and recordings are saved as 24-bit WAVs in the project's `Audio` folder.
@@ -15,6 +15,10 @@ A small Logic-style multitrack recorder for Windows and Mac, written in C++ with
 - **Mixer** (X): faders, pan, mute/solo, peak meters, Stereo Out.
 - **Plugins**: VST3 on Windows and Mac, plus Audio Units on Mac. Each track has six Audio FX insert slots on its mixer strip: click an empty slot to add an effect, click it again to open its window, right-click to bypass, replace or remove it. Plugin settings are saved in the project. Find your plugins with **File → Plugin Manager → Scan / Options → Scan for new or updated VST3 plug-ins**.
 - **MIDI keyboards and instruments**: any USB MIDI keyboard is switched on automatically (the MIDI light on the display flashes when it's sending). Add an instrument track with **Ctrl+Alt+S**, pick a synth plugin (VST3 instrument, or AU on Mac), and play: the selected instrument track always hears the keyboard. Arm it (R) and press R to record MIDI regions, which you can move, trim and split like audio and which draw their notes in the arrange window.
+- **Built-in instruments and amp** (under "Tracklayer" in the plugin menus, nothing to install):
+  - **Tracklayer Keys**: a sampled grand piano (three velocity layers) and an FM electric piano with tremolo. Presets: Grand, Bright, Felt, Electric, Tremolo EP.
+  - **Tracklayer Synth**: two-oscillator analogue-style synth with filter envelope, chorus and reverb. Presets: Warm Pad, Synth Bass, Bright Lead, Soft Strings, Brass Stab, Pluck.
+  - **Tracklayer Brit Amp**: a mid-forward British valve amp (gain, bass, middle, treble, presence, master, bright switch, noise gate) with a 4x12 cabinet you can switch off to use your own IR.
 - **Import** WAV, AIFF, FLAC, Ogg and MP3 files by drag-and-drop from Explorer or with Ctrl+I.
 - **Bounce** the mix to a 24-bit WAV with Ctrl+B.
 - **Save and open** `.tlproj` projects, which are plain JSON and point at the audio files.
@@ -23,9 +27,9 @@ A small Logic-style multitrack recorder for Windows and Mac, written in C++ with
 
 ### Option A: let GitHub build it (no software to install)
 
-1. Create a new GitHub repository and upload this folder to it.
+1. Push this folder to a GitHub repository (the build file is in `.github/workflows`).
 2. Open the **Actions** tab. The "Build" workflow runs automatically, or you can start it with **Run workflow**.
-3. When it finishes (about 10–15 minutes), download **Tracklayer-Windows** or **Tracklayer-Mac** from the run's Artifacts.
+3. When it finishes (about 10–15 minutes), download **Tracklayer-Windows** from the run's Artifacts.
 
 The Mac app isn't signed, so the first time, right-click it and choose **Open**, then **Open** again.
 
@@ -88,6 +92,10 @@ Tracklayer.exe --bounce "My Song.tlproj" "Mix.wav"     render without opening th
 3. Piano roll editing, quantise, controller mapping (transport buttons, knobs)
 4. Plugin latency compensation, sends, buses and automation
 5. Importing Logic projects: stems and MIDI first, then AAF, then reading `.logicx` directly
+
+## Credits
+
+Tracklayer Keys uses the [Salamander Grand Piano](https://github.com/sfzinstruments/SalamanderGrandPiano) samples by Alexander Holm, licensed under [CC-BY 3.0](https://creativecommons.org/licenses/by/3.0/). They have been trimmed and compressed for this app.
 
 ## Licence note
 
