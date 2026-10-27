@@ -24,13 +24,16 @@ jobs:
       - run: cmake --build build --config Release -- -quiet
       - name: Sign (ad-hoc) and zip
         run: |
+          set -o pipefail
           cd build/Tracklayer_artefacts/Release
-          codesign --force --deep --sign - Tracklayer.app
-          codesign --verify --verbose Tracklayer.app
-          lipo -info Tracklayer.app/Contents/MacOS/Tracklayer
-          lipo -verify_arch x86_64 arm64 Tracklayer.app/Contents/MacOS/Tracklayer   # must run on Intel and Apple Silicon
-          /usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" Tracklayer.app/Contents/Info.plist || true
-          ditto -c -k --keepParent Tracklayer.app Tracklayer-mac.zip
+          ls -la
+          step() { echo "+ $*"; if ! out=$("$@" 2>&1); then echo "$out"; echo "::error title=$1 failed::$(echo "$out" | tail -5 | tr '\n' ' ')"; exit 1; fi; echo "$out"; }
+          echo "::notice title=arch::$(lipo -info Tracklayer.app/Contents/MacOS/Tracklayer 2>&1)"
+          step codesign --force --deep --sign - Tracklayer.app
+          step codesign --verify --verbose Tracklayer.app
+          step lipo -verify_arch x86_64 arm64 Tracklayer.app/Contents/MacOS/Tracklayer
+          echo "::notice title=min macOS::$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' Tracklayer.app/Contents/Info.plist 2>&1)"
+          step ditto -c -k --keepParent Tracklayer.app Tracklayer-mac.zip
       - uses: actions/upload-artifact@v4
         with:
           name: Tracklayer-Mac
