@@ -18,7 +18,7 @@ cmake --build build-mac --config Release --parallel
 APP=build-mac/Tracklayer_artefacts/Release/Tracklayer.app
 [ -d "$APP" ] || APP=build-mac/Tracklayer_artefacts/Tracklayer.app
 codesign --force --deep --sign - "$APP"
-lipo -verify_arch x86_64 arm64 "$APP/Contents/MacOS/Tracklayer" && echo "Universal app: runs on Intel and Apple Silicon"
+lipo "$APP/Contents/MacOS/Tracklayer" -verify_arch x86_64 arm64 && echo "Universal app: runs on Intel and Apple Silicon"
 
 rm -rf Tracklayer.app
 cp -R "$APP" .

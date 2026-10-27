@@ -31,7 +31,7 @@ jobs:
           echo "::notice title=arch::$(lipo -info Tracklayer.app/Contents/MacOS/Tracklayer 2>&1)"
           step codesign --force --deep --sign - Tracklayer.app
           step codesign --verify --verbose Tracklayer.app
-          step lipo -verify_arch x86_64 arm64 Tracklayer.app/Contents/MacOS/Tracklayer
+          step lipo Tracklayer.app/Contents/MacOS/Tracklayer -verify_arch x86_64 arm64
           echo "::notice title=min macOS::$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' Tracklayer.app/Contents/Info.plist 2>&1)"
           step ditto -c -k --keepParent Tracklayer.app Tracklayer-mac.zip
       - uses: actions/upload-artifact@v4
